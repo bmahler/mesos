@@ -5611,50 +5611,57 @@ void Master::frameworkFailoverTimeout(const FrameworkID& frameworkId,
 }
 
 
-void Master::offer(const FrameworkID& frameworkId,
-                   const hashmap<SlaveID, Resources>& resources)
+void Master::offer(const vector<allocator::Offer>& offers)
 {
-  if (!frameworks.registered.contains(frameworkId) ||
-      !frameworks.registered[frameworkId]->active) {
-    LOG(WARNING) << "Master returning resources offered to framework "
-                 << frameworkId << " because the framework"
-                 << " has terminated or is inactive";
+  // First we filter out any offers for frameworks
+  // or agents that are no longer active.
+  hashmap<FrameworkID, vector<allocator::Offer>> outgoing;
 
-    foreachpair (const SlaveID& slaveId, const Resources& offered, resources) {
-      allocator->recoverResources(frameworkId, slaveId, offered, None());
-    }
-    return;
-  }
+  foreach (const allocator::Offer& offer, offers) {
+    if (!frameworks.registered.contains(frameworkId)) {
+      LOG(WARNING) << "Master declining resources offered to"
+                   << " framework " << frameworkId
+                   << " because the framework is not registered";
 
-  // Create an offer for each slave and add it to the message.
-  ResourceOffersMessage message;
-
-  Framework* framework = CHECK_NOTNULL(frameworks.registered[frameworkId]);
-  foreachpair (const SlaveID& slaveId, const Resources& offered, resources) {
-    if (!slaves.registered.contains(slaveId)) {
-      LOG(WARNING)
-        << "Master returning resources offered to framework " << *framework
-        << " because agent " << slaveId << " is not valid";
-
-      allocator->recoverResources(frameworkId, slaveId, offered, None());
+      allocator->decline(offer.offerId, None());
       continue;
     }
 
-    Slave* slave = slaves.registered.get(slaveId);
-    CHECK_NOTNULL(slave);
+    if (!slaves.registered.contains(slaveId)) {
+      LOG(WARNING) << "Master declining resources offered to"
+                   << " framework " << *framework
+                   << " because agent " << slaveId << " is not registered";
 
-    // This could happen if the allocator dispatched 'Master::offer' before
-    // the slave was deactivated in the allocator.
+      allocator->decline(offer.offerId, None());
+      continue;
+    }
+
+    Framework* framework = CHECK_NOTNULL(frameworks.registered[frameworkId]);
+    Slave* slave = CHECK_NOTNULL(slaves.registered.get(slaveId));
+
+    if (!framework->active) {
+      LOG(WARNING) << "Master declining resources offered to"
+                   << " framework " << *framework
+                   << " because the framework is"
+                   << (framework->connected ? "deactivated" : "disconnected");
+
+      allocator->decline(offer.offerId, None());
+      continue;
+    }
+
     if (!slave->active) {
-      LOG(WARNING)
-        << "Master returning resources offered because agent " << *slave
-        << " is " << (slave->connected ? "deactivated" : "disconnected");
+      LOG(WARNING) << "Master declining resources offered to"
+                   << " framework " << *framework
+                   << " because agent " << *slave << " is "
+                   << (slave->connected ? "deactivated" : "disconnected");
 
-      allocator->recoverResources(frameworkId, slaveId, offered, None());
+      allocator->decline(offer.offerId, None());
       continue;
     }
 
 #ifdef WITH_NETWORK_ISOLATOR
+    // Check that we haven't hit the executor limit.
+    //
     // TODO(dhamon): This flag is required as the static allocation of
     // ephemeral ports leads to a maximum number of containers that can
     // be created on each slave. Once MESOS-1654 is fixed and ephemeral
@@ -5663,98 +5670,108 @@ void Master::offer(const FrameworkID& frameworkId,
       // Check that we haven't hit the executor limit.
       size_t numExecutors = 0;
       foreachkey (const FrameworkID& frameworkId, slave->executors) {
-        numExecutors += slave->executors[frameworkId].keys().size();
+        numExecutors += slave->executors[frameworkId].size();
       }
 
       if (numExecutors >= flags.max_executors_per_agent.get()) {
-        LOG(WARNING) << "Master returning resources offered because agent "
-                     << *slave << " has reached the maximum number of "
-                     << "executors";
-        // Pass a default filter to avoid getting this same offer immediately
-        // from the allocator.
-        allocator->recoverResources(frameworkId, slaveId, offered, Filters());
+        LOG(WARNING) << "Master declining resources offered to"
+                     << " framework " << *framework
+                     << " because agent " << *slave
+                     << " has reached the maximum number of executors";
+
+        // Pass a default filter to avoid getting this same
+        // offer immediately from the allocator.
+        allocator->decline(offer.offerId, Filters());
         continue;
       }
     }
 #endif // WITH_NETWORK_ISOLATOR
 
-    // TODO(vinod): Split regular and revocable resources into
-    // separate offers, so that rescinding offers with revocable
-    // resources does not affect offers with regular resources.
-
-    // TODO(bmahler): Set "https" if only "https" is supported.
-    mesos::URL url;
-    url.set_scheme("http");
-    url.mutable_address()->set_hostname(slave->info.hostname());
-    url.mutable_address()->set_ip(stringify(slave->pid.address.ip));
-    url.mutable_address()->set_port(slave->pid.address.port);
-    url.set_path("/" + slave->pid.id);
-
-    Offer* offer = new Offer();
-    offer->mutable_id()->MergeFrom(newOfferId());
-    offer->mutable_framework_id()->MergeFrom(framework->id());
-    offer->mutable_slave_id()->MergeFrom(slave->id);
-    offer->set_hostname(slave->info.hostname());
-    offer->mutable_url()->MergeFrom(url);
-    offer->mutable_resources()->MergeFrom(offered);
-    offer->mutable_attributes()->MergeFrom(slave->info.attributes());
-
-    // Add all framework's executors running on this slave.
-    if (slave->executors.contains(framework->id())) {
-      const hashmap<ExecutorID, ExecutorInfo>& executors =
-        slave->executors[framework->id()];
-      foreachkey (const ExecutorID& executorId, executors) {
-        offer->add_executor_ids()->MergeFrom(executorId);
-      }
-    }
-
-    // If the slave in this offer is planned to be unavailable due to
-    // maintenance in the future, then set the Unavailability.
-    CHECK(machines.contains(slave->machineId));
-    if (machines[slave->machineId].info.has_unavailability()) {
-      offer->mutable_unavailability()->CopyFrom(
-          machines[slave->machineId].info.unavailability());
-    }
-
-    offers[offer->id()] = offer;
-
-    framework->addOffer(offer);
-    slave->addOffer(offer);
-
-    if (flags.offer_timeout.isSome()) {
-      // Rescind the offer after the timeout elapses.
-      offerTimers[offer->id()] =
-        delay(flags.offer_timeout.get(),
-              self(),
-              &Self::offerTimeout,
-              offer->id());
-    }
-
-    // TODO(jieyu): For now, we strip 'ephemeral_ports' resource from
-    // offers so that frameworks do not see this resource. This is a
-    // short term workaround. Revisit this once we resolve MESOS-1654.
-    Offer offer_ = *offer;
-    offer_.clear_resources();
-
-    foreach (const Resource& resource, offered) {
-      if (resource.name() != "ephemeral_ports") {
-        offer_.add_resources()->CopyFrom(resource);
-      }
-    }
-
-    // Add the offer *AND* the corresponding slave's PID.
-    message.add_offers()->MergeFrom(offer_);
-    message.add_pids(slave->pid);
+    outgoing[frameworkId].push_back(offer);
   }
 
-  if (message.offers().size() == 0) {
-    return;
+  // We now send each framework its offers.
+  //
+  // TODO(bmahler): Consider shuffling the offers to ensure
+  // that we send out optimistic offers with a random bias.
+  foreachkey (const FrameworkID& frameworkId, outgoing) {
+    Framework* framework = CHECK_NOTNULL(frameworks.registered[frameworkId]);
+    ResourceOffersMessage message;
+
+    foreach (const allocator::Offer& offer, outgoing[frameworkId]) {
+      Slave* slave = CHECK_NOTNULL(slaves.registered.get(slaveId));
+
+      // TODO(bmahler): Set "https" if only "https" is supported.
+      mesos::URL url;
+      url.set_scheme("http");
+      url.mutable_address()->set_hostname(slave->info.hostname());
+      url.mutable_address()->set_ip(stringify(slave->pid.address.ip));
+      url.mutable_address()->set_port(slave->pid.address.port);
+      url.set_path("/" + slave->pid.id);
+
+      Offer* o = new Offer();
+      o->mutable_id()->CopyFrom(offer.id);
+      o->mutable_framework_id()->CopyFrom(framework->id());
+      o->mutable_slave_id()->MergeFrom(slave->id);
+      o->set_hostname(slave->info.hostname());
+      o->mutable_url()->MergeFrom(url);
+      o->mutable_resources()->MergeFrom(offered);
+      o->mutable_attributes()->MergeFrom(slave->info.attributes());
+
+      // Add all framework's executors running on this slave.
+      if (slave->executors.contains(framework->id())) {
+        foreachkey (const ExecutorID& executorId,
+                    slave->executors[framework->id()]) {
+          o->add_executor_ids()->MergeFrom(executorId);
+        }
+      }
+
+      // If the slave in this offer is planned to be unavailable due to
+      // maintenance in the future, then set the Unavailability.
+      CHECK(machines.contains(slave->machineId));
+      if (machines[slave->machineId].info.has_unavailability()) {
+        o->mutable_unavailability()->CopyFrom(
+            machines[slave->machineId].info.unavailability());
+      }
+
+      offers[o->id()] = o;
+
+      framework->addOffer(o);
+      slave->addOffer(o);
+
+      if (flags.offer_timeout.isSome()) {
+        // Rescind the offer after the timeout elapses.
+        offerTimers[o->id()] =
+          delay(flags.offer_timeout.get(),
+                self(),
+                &Self::offerTimeout,
+                o->id());
+      }
+
+      // TODO(jieyu): For now, we strip 'ephemeral_ports' resource from
+      // offers so that frameworks do not see this resource. This is a
+      // short term workaround. Revisit this once we resolve MESOS-1654.
+      Offer copy = *o;
+      copy.clear_resources();
+
+      foreach (const Resource& resource, offered) {
+        if (resource.name() != "ephemeral_ports") {
+          copy.add_resources()->CopyFrom(resource);
+        }
+      }
+
+      // Add the offer *AND* the corresponding slave's PID.
+      message.add_offers()->MergeFrom(copy);
+      message.add_pids(slave->pid);
+    }
+
+    if (message.offers().size() > 0) {
+      LOG(INFO) << "Sending " << message.offers().size() << " offers"
+                << " to framework " << *framework;
+
+      framework->send(message);
+    }
   }
-
-  LOG(INFO) << "Sending " << message.offers().size()
-            << " offers to framework " << *framework;
-
-  framework->send(message);
 }
 
 

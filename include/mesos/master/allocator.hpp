@@ -20,14 +20,15 @@
 #include <string>
 #include <vector>
 
+#include <mesos/mesos.hpp>
+#include <mesos/resources.hpp>
+
 // ONLY USEFUL AFTER RUNNING PROTOC.
 #include <mesos/master/allocator.pb.h>
 
 #include <mesos/maintenance/maintenance.hpp>
 
 #include <mesos/quota/quota.hpp>
-
-#include <mesos/resources.hpp>
 
 #include <process/future.hpp>
 
@@ -41,6 +42,22 @@
 namespace mesos {
 namespace master {
 namespace allocator {
+
+
+struct Offer
+{
+  OfferID offerId;
+  FrameworkID frameworkId;
+  SlaveID slaveId;
+  Resources resources;
+};
+
+
+struct Accepted
+{
+  std::vector<mesos::Offer::Operation> operations;
+};
+
 
 /**
  * Basic model of an allocator: resources are allocated to a framework
@@ -78,7 +95,7 @@ public:
    *     determines how often the allocator should perform the batch
    *     allocation. An allocator may also perform allocation based on events
    *     (a framework is added and so on), this depends on the implementation.
-   * @param offerCallback A callback the allocator uses to send allocations
+   * @param offerCallback A callback the allocator uses to send offers
    *     to the frameworks.
    * @param inverseOfferCallback A callback the allocator uses to send reclaim
    *     allocations from the frameworks.
@@ -87,9 +104,7 @@ public:
    */
   virtual void initialize(
       const Duration& allocationInterval,
-      const lambda::function<
-          void(const FrameworkID&,
-               const hashmap<SlaveID, Resources>&)>& offerCallback,
+      const lambda::function<void(const vector<Offer>&)>& offerCallback,
       const lambda::function<
           void(const FrameworkID&,
                const hashmap<SlaveID, UnavailableResources>&)>&
@@ -245,18 +260,31 @@ public:
       const FrameworkID& frameworkId,
       const std::vector<Request>& requests) = 0;
 
-  /**
-   * Updates allocation by applying offer operations.
-   *
-   * This call is mainly intended to support persistence-related features
-   * (dynamic reservation and persistent volumes). The allocator may react
-   * differently for certain offer operations. The allocator should use this
-   * call to update bookkeeping information related to the framework.
-   */
-  virtual void updateAllocation(
-      const FrameworkID& frameworkId,
-      const SlaveID& slaveId,
-      const std::vector<Offer::Operation>& operations) = 0;
+  // Returns whether the offers were accepted. Because of the asynchronous
+  // interaction between the scheduler and the allocator, the offers may
+  // be no longer be available.
+  // XXX fails if operations are invalid, not expected!
+  virtual process::Future<Accepted> accept(
+      const std::vector<OfferID>& offer,
+      const std::vector<mesos::Offer::Operation>& operations,
+      const Option<Filters>& filters) = 0;
+
+  virtual process::Future<Nothing> decline(
+      const OfferID& offer,
+      const Option<Filters>& filters) = 0;
+
+//  /**
+//   * Updates allocation by applying offer operations.
+//   *
+//   * This call is mainly intended to support persistence-related features
+//   * (dynamic reservation and persistent volumes). The allocator may react
+//   * differently for certain offer operations. The allocator should use this
+//   * call to update bookkeeping information related to the framework.
+//   */
+//  virtual void updateAllocation(
+//      const FrameworkID& frameworkId,
+//      const SlaveID& slaveId,
+//      const std::vector<mesos::Offer::Operation>& operations) = 0;
 
   /**
    * Updates available resources on an agent based on a sequence of offer
@@ -267,7 +295,7 @@ public:
    */
   virtual process::Future<Nothing> updateAvailable(
       const SlaveID& slaveId,
-      const std::vector<Offer::Operation>& operations) = 0;
+      const std::vector<mesos::Offer::Operation>& operations) = 0;
 
   /**
    * Updates unavailability for an agent.
@@ -313,18 +341,18 @@ public:
       hashmap<SlaveID, hashmap<FrameworkID, mesos::master::InverseOfferStatus>>>
     getInverseOfferStatuses() = 0;
 
-  /**
-   * Recovers resources.
-   *
-   * Used to update the set of available resources for a specific agent. This
-   * method is invoked to inform the allocator about allocated resources that
-   * have been refused or are no longer in use.
-   */
-  virtual void recoverResources(
-      const FrameworkID& frameworkId,
-      const SlaveID& slaveId,
-      const Resources& resources,
-      const Option<Filters>& filters) = 0;
+//  /**
+//   * Recovers resources.
+//   *
+//   * Used to update the set of available resources for a specific agent. This
+//   * method is invoked to inform the allocator about allocated resources that
+//   * have been refused or are no longer in use.
+//   */
+//  virtual void recoverResources(
+//      const FrameworkID& frameworkId,
+//      const SlaveID& slaveId,
+//      const Resources& resources,
+//      const Option<Filters>& filters) = 0;
 
   /**
    * Suppresses offers.
