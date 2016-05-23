@@ -53,8 +53,6 @@ using std::string;
 using std::vector;
 
 
-Nothing _nothing() { return Nothing(); }
-
 template <typename T>
 static Future<T> failure(
     const string& cmd,
@@ -62,8 +60,8 @@ static Future<T> failure(
     const string& err)
 {
   return Failure(
-      "Failed to '" + cmd + "': exit status = " +
-      WSTRINGIFY(status) + " stderr = " + err);
+      "Failed to run '" + cmd + "': " + WSTRINGIFY(status) +
+      "; stderr='" + err + "'");
 }
 
 
@@ -439,7 +437,7 @@ Try<Docker::Image> Docker::Image::create(const JSON::Object& json)
 }
 
 
-Future<Nothing> Docker::run(
+Future<Option<int>> Docker::run(
     const ContainerInfo& containerInfo,
     const CommandInfo& commandInfo,
     const string& name,
@@ -696,26 +694,13 @@ Future<Nothing> Docker::run(
     return Failure(s.error());
   }
 
+  s->status()
+    .onDiscard(lambda::bind(&commandDiscarded, s.get(), cmd));
+
   // We don't call checkError here to avoid printing the stderr
   // of the docker container task as docker run with attach forwards
   // the container's stderr to the client's stderr.
-  return s.get().status()
-    .then(lambda::bind(
-        &Docker::_run,
-        lambda::_1))
-    .onDiscard(lambda::bind(&commandDiscarded, s.get(), cmd));
-}
-
-
-Future<Nothing> Docker::_run(const Option<int>& status)
-{
-  if (status.isNone()) {
-    return Failure("Failed to get exit status");
-  } else if (status.get() != 0) {
-    return Failure("Container exited on error: " + WSTRINGIFY(status.get()));
-  }
-
-  return Nothing();
+  return s->status();
 }
 
 
@@ -770,6 +755,39 @@ Future<Nothing> Docker::_stop(
   }
 
   return checkError(cmd, s);
+}
+
+
+Future<Nothing> Docker::kill(
+    const string& containerName,
+    int signal)
+{
+  if (signal >= NSIG) {
+    return Failure("Unknown signal " + stringify(signal));
+  }
+
+  const string cmd =
+    path + " -H " + socket +
+    "kill --signal=" + signalName + " " + containerName;
+
+  VLOG(1) << "Running " << cmd;
+
+  Try<Subprocess> s = subprocess(
+      cmd,
+      Subprocess::PATH("/dev/null"),
+      Subprocess::PATH("/dev/null"),
+      Subprocess::PIPE());
+
+  if (s.isError()) {
+    return Failure(s.error());
+  }
+
+  return s.get().status()
+    .then(lambda::bind(&Docker::_kill, *this,
+        containerName,
+        cmd,
+        s.get(),
+        remove));
 }
 
 

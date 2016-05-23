@@ -112,7 +112,7 @@ public:
   };
 
   // Performs 'docker run IMAGE'.
-  virtual process::Future<Nothing> run(
+  virtual process::Future<Option<int>> run(
       const mesos::ContainerInfo& containerInfo,
       const mesos::CommandInfo& commandInfo,
       const std::string& containerName,
@@ -137,6 +137,11 @@ public:
       const std::string& containerName,
       const Duration& timeout = Seconds(0),
       bool remove = false) const;
+
+  // Performs 'docker kill --signal=<signal> CONTAINER'.
+  virtual process::Future<Nothing> kill(
+      const std::string& containerName,
+      int signal);
 
   // Performs 'docker rm (-f) CONTAINER'.
   virtual process::Future<Nothing> rm(
