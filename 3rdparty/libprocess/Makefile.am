@@ -107,6 +107,7 @@ libprocess_la_SOURCES =		\
   src/http.cpp			\
   src/io.cpp			\
   src/latch.cpp			\
+  src/limiter.cpp		\
   src/logging.cpp		\
   src/metrics/metrics.cpp	\
   src/pid.cpp			\
