@@ -2198,7 +2198,8 @@ TEST_F(PortMappingMesosTest, ROOT_NetworkNamespaceHandleSymlink)
   EXPECT_TRUE(os::exists(symlink));
   EXPECT_TRUE(os::stat::islink(symlink));
 
-  Future<ContainerTermination> termination = containerizer->wait(containerId);
+  Future<Option<ContainerTermination>> termination =
+    containerizer->wait(containerId);
 
   driver.killTask(task.task_id());
 
@@ -2207,6 +2208,8 @@ TEST_F(PortMappingMesosTest, ROOT_NetworkNamespaceHandleSymlink)
   EXPECT_EQ(TASK_KILLED, status2.get().state());
 
   AWAIT_READY(termination);
+  EXPECT_SOME(termination.get());
+
   EXPECT_FALSE(os::exists(symlink));
 
   driver.stop();
