@@ -724,9 +724,9 @@ Future<Option<ContainerTermination>> DockerContainerizer::wait(
 }
 
 
-void DockerContainerizer::destroy(const ContainerID& containerId)
+Future<bool> DockerContainerizer::destroy(const ContainerID& containerId)
 {
-  dispatch(
+  return dispatch(
       process.get(),
       &DockerContainerizerProcess::destroy,
       containerId, true);
@@ -1795,15 +1795,14 @@ Future<Option<ContainerTermination>> DockerContainerizerProcess::wait(
 }
 
 
-void DockerContainerizerProcess::destroy(
+Future<bool> DockerContainerizerProcess::destroy(
     const ContainerID& containerId,
     bool killed)
 {
   CHECK(!containerId.has_parent());
 
   if (!containers_.contains(containerId)) {
-    LOG(WARNING) << "Ignoring destroy of unknown container: " << containerId;
-    return;
+    return false;
   }
 
   Container* container = containers_[containerId];
@@ -1822,12 +1821,12 @@ void DockerContainerizerProcess::destroy(
     containers_.erase(containerId);
     delete container;
 
-    return;
+    return true;
   }
 
   if (container->state == Container::DESTROYING) {
-    // Destroy has already been initiated.
-    return;
+    return container->termination.future()
+      .then([]() { return true; });
   }
 
   LOG(INFO) << "Destroying container '" << containerId << "'";
@@ -1869,7 +1868,7 @@ void DockerContainerizerProcess::destroy(
     containers_.erase(containerId);
     delete container;
 
-    return;
+    return true;
   }
 
   if (container->state == Container::PULLING) {
@@ -1885,7 +1884,7 @@ void DockerContainerizerProcess::destroy(
     containers_.erase(containerId);
     delete container;
 
-    return;
+    return true;
   }
 
   if (container->state == Container::MOUNTING) {
@@ -1908,7 +1907,7 @@ void DockerContainerizerProcess::destroy(
     containers_.erase(containerId);
     delete container;
 
-    return;
+    return true;
   }
 
   CHECK(container->state == Container::RUNNING);
@@ -1940,6 +1939,9 @@ void DockerContainerizerProcess::destroy(
   // above.
   container->status.future()
     .onAny(defer(self(), &Self::_destroy, containerId, killed));
+
+  return container->termination.future()
+    .then([]() { return true; });
 }
 
 
