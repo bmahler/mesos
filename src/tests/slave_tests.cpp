@@ -1916,8 +1916,7 @@ TEST_F(SlaveTest, StatisticsEndpointGetResourceUsageFailed)
       createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
   AWAIT_READY(response);
-  AWAIT_EXPECT_RESPONSE_STATUS_EQ(
-      ServiceUnavailable().status, response);
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(InternalServerError().status, response);
 
   terminate(slave);
   wait(slave);
