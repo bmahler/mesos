@@ -65,6 +65,8 @@
 
 #include "version/version.hpp"
 
+using mesos::slave::ContainerTermination;
+
 using process::AUTHENTICATION;
 using process::AUTHORIZATION;
 using process::Clock;
@@ -1888,7 +1890,38 @@ Future<Response> Slave::Http::nestedContainerLaunch(
     const Option<string>& principal,
     ContentType contentType) const
 {
-  return Failure("Unimplemented");
+  CHECK_EQ(mesos::agent::Call::NESTED_CONTAINER_LAUNCH, call.type());
+  CHECK(call.has_nested_container_launch());
+
+  Future<Nothing> launched = slave->containerizer->launch(
+      call.nested_container_launch().container_id(),
+      call.nested_container_launch().command(),
+      call.nested_container_launch().has_container()
+        ? call.nested_container_launch().container()
+        : Option<ContainerInfo>::none(),
+      call.nested_container_launch().resources());
+
+  const ContainerID& containerId =
+    call.nested_container_launch().container_id();
+
+  // TODO(bmahler): The containerizers currently require that
+  // the caller calls destroy if the launch fails. See MESOS-6214.
+  launched
+    .onFailed(defer(slave->self(), [=](const string& failure) {
+      LOG(WARNING) << "Failed to perform NESTED_CONTAINER_LAUNCH"
+                   << " of container " << containerId << ": " << failure;
+
+      slave->containerizer->destroy(containerId)
+        .onFailed([=](const string& failure) {
+          LOG(ERROR) << "Failed to destroy container " << containerId
+                     << " after launch failure: " << failure;
+        });
+    }));
+
+  return launched
+    .then([]() -> Response {
+      return OK();
+    });
 }
 
 
@@ -1897,7 +1930,35 @@ Future<Response> Slave::Http::nestedContainerWait(
     const Option<string>& principal,
     ContentType contentType) const
 {
-  return Failure("Unimplemented");
+  CHECK_EQ(mesos::agent::Call::NESTED_CONTAINER_WAIT, call.type());
+  CHECK(call.has_nested_container_wait());
+
+  const ContainerID& containerId = call.nested_container_wait().container_id();
+
+  Future<Option<mesos::slave::ContainerTermination>> wait =
+    slave->containerizer->wait(containerId);
+
+  return wait
+    .then([containerId, contentType](
+        const Option<ContainerTermination>& termination) -> Response {
+      if (termination.isNone()) {
+        return NotFound("Container '" + stringify(containerId) + "'"
+                        " cannot be found");
+      }
+
+      mesos::agent::Response response;
+      response.set_type(mesos::agent::Response::NESTED_CONTAINER_WAIT);
+
+      mesos::agent::Response::NestedContainerWait* nestedContainerWait =
+        response.mutable_nested_container_wait();
+
+      if (termination->has_status()) {
+        nestedContainerWait->set_exit_status(termination->status());
+      }
+
+      return OK(serialize(contentType, evolve(response)),
+                stringify(contentType));
+    });
 }
 
 
@@ -1906,7 +1967,22 @@ Future<Response> Slave::Http::nestedContainerKill(
     const Option<string>& principal,
     ContentType contentType) const
 {
-  return Failure("Unimplemented");
+  CHECK_EQ(mesos::agent::Call::NESTED_CONTAINER_KILL, call.type());
+  CHECK(call.has_nested_container_kill());
+
+  const ContainerID& containerId =
+    call.nested_container_kill().container_id();
+
+  Future<bool> destroy = slave->containerizer->destroy(containerId);
+
+  return destroy
+    .then([containerId](bool found) -> Response {
+      if (!found) {
+        return NotFound("Container '" + stringify(containerId) + "'"
+                        " cannot be found (or is already killed)");
+      }
+      return OK();
+    });
 }
 
 } // namespace slave {
