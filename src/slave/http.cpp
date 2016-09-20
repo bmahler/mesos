@@ -398,6 +398,15 @@ Future<Response> Slave::Http::api(
 
     case agent::Call::GET_TASKS:
       return getTasks(call, principal, acceptType);
+
+    case agent::Call::NESTED_CONTAINER_LAUNCH:
+      return nestedContainerLaunch(call, principal, acceptType);
+
+    case agent::Call::NESTED_CONTAINER_WAIT:
+      return nestedContainerWait(call, principal, acceptType);
+
+    case agent::Call::NESTED_CONTAINER_KILL:
+      return nestedContainerKill(call, principal, acceptType);
   }
 
   UNREACHABLE();
@@ -1871,6 +1880,33 @@ Future<Response> Slave::Http::readFile(
       return OK(serialize(contentType, evolve(response)),
                 stringify(contentType));
     });
+}
+
+
+Future<Response> Slave::Http::nestedContainerLaunch(
+    const mesos::agent::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  return Failure("Unimplemented");
+}
+
+
+Future<Response> Slave::Http::nestedContainerWait(
+    const mesos::agent::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  return Failure("Unimplemented");
+}
+
+
+Future<Response> Slave::Http::nestedContainerKill(
+    const mesos::agent::Call& call,
+    const Option<string>& principal,
+    ContentType contentType) const
+{
+  return Failure("Unimplemented");
 }
 
 } // namespace slave {

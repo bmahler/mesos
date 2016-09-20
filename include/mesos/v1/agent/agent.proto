@@ -53,6 +53,11 @@ message Call {
     GET_FRAMEWORKS = 11;    // Retrieves the information about known frameworks.
     GET_EXECUTORS = 12;     // Retrieves the information about known executors.
     GET_TASKS = 13;         // Retrieves the information about known tasks.
+
+    // Calls for managing nested containers underneath an executor's container.
+    NESTED_CONTAINER_LAUNCH = 14;  // See 'NestedContainerLaunch' below.
+    NESTED_CONTAINER_WAIT = 15;    // See 'NestedContainerWait' below.
+    NESTED_CONTAINER_KILL = 16;    // See 'NestedContainerKill' below.
   }
 
   // Provides a snapshot of the current metrics tracked by the agent.
@@ -93,12 +98,38 @@ message Call {
     optional uint64 length = 3;
   }
 
+  // Launches a nested container within an executor's tree of containers.
+  message NestedContainerLaunch {
+    // The 'container_id.value' must be an RFC-4122 Version 4 UUID
+    // and the 'container_id.parent' must be set.
+    required ContainerID container_id = 1;
+
+    optional CommandInfo command = 2;
+    optional ContainerInfo container = 3;
+
+    // TODO(bmahler): Are there requirements on providing resources?
+    repeated Resource resources = 4;
+  }
+
+  // Waits for the nested container to terminate and receives the exit status.
+  message NestedContainerWait {
+    required ContainerID container_id = 1;
+  }
+
+  // Kills the nested container. Currently only supports SIGKILL.
+  message NestedContainerKill {
+    required ContainerID container_id = 1;
+  }
+
   optional Type type = 1;
 
   optional GetMetrics get_metrics = 2;
   optional SetLoggingLevel set_logging_level = 3;
   optional ListFiles list_files = 4;
   optional ReadFile read_file = 5;
+  optional NestedContainerLaunch nested_container_launch = 6;
+  optional NestedContainerWait nested_container_wait = 7;
+  optional NestedContainerKill nested_container_kill = 8;
 }
 
 
@@ -126,6 +157,8 @@ message Response {
     GET_FRAMEWORKS = 10;           // See 'GetFrameworks' below.
     GET_EXECUTORS = 11;            // See 'GetExecutors' below.
     GET_TASKS = 12;                // See 'GetTasks' below.
+
+    NESTED_CONTAINER_WAIT = 13;    // See 'NestedContainerWait' below.
   }
 
   // `healthy` would be true if the agent is healthy. Delayed responses are also
@@ -234,6 +267,11 @@ message Response {
     repeated Task completed_tasks = 5;
   }
 
+  // Returns termination information about the nested container.
+  message NestedContainerWait {
+    optional int32 exit_status = 1;
+  }
+
   optional Type type = 1;
 
   optional GetHealth get_health = 2;
@@ -248,4 +286,5 @@ message Response {
   optional GetFrameworks get_frameworks = 11;
   optional GetExecutors get_executors = 12;
   optional GetTasks get_tasks = 13;
+  optional NestedContainerWait nested_container_wait = 14;
 }

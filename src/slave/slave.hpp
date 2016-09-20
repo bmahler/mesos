@@ -609,6 +609,21 @@ private:
         const process::Owned<ObjectApprover>& taskApprover,
         const process::Owned<ObjectApprover>& executorsApprover) const;
 
+    process::Future<process::http::Response> nestedContainerLaunch(
+        const mesos::agent::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> nestedContainerWait(
+        const mesos::agent::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
+    process::Future<process::http::Response> nestedContainerKill(
+        const mesos::agent::Call& call,
+        const Option<std::string>& principal,
+        ContentType contentType) const;
+
     Slave* slave;
 
     // Used to rate limit the statistics endpoint.

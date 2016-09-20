@@ -99,6 +99,15 @@ Option<Error> validate(
 
     case mesos::agent::Call::GET_TASKS:
       return None();
+
+    case mesos::agent::Call::NESTED_CONTAINER_LAUNCH:
+      return Error("Unimplemented");
+
+    case mesos::agent::Call::NESTED_CONTAINER_WAIT:
+      return Error("Unimplemented");
+
+    case mesos::agent::Call::NESTED_CONTAINER_KILL:
+      return Error("Unimplemented");
   }
 
   UNREACHABLE();
