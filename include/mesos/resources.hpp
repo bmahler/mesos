@@ -329,6 +329,15 @@ public:
 
   size_t size() const { return resources.size(); }
 
+  // Allocates the resources to the given role (by setting the
+  // `AllocationInfo.role`). Any existing allocation will be
+  // over-written.
+  void allocate(const std::string& role);
+
+  // Unallocates the resources, returns false if the resources
+  // were already unallocated.
+  bool unallocate();
+
   // Checks if this Resources is a superset of the given Resources.
   bool contains(const Resources& that) const;
 
