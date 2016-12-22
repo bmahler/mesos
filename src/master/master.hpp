@@ -44,7 +44,9 @@
 
 #include <mesos/scheduler/scheduler.hpp>
 
+#include <process/after.hpp>
 #include <process/limiter.hpp>
+#include <process/loop.hpp>
 #include <process/http.hpp>
 #include <process/owned.hpp>
 #include <process/process.hpp>
@@ -2188,47 +2190,6 @@ inline std::ostream& operator<<(
     const Framework& framework);
 
 
-// This process periodically sends heartbeats to a scheduler on the
-// given HTTP connection.
-class Heartbeater : public process::Process<Heartbeater>
-{
-public:
-  Heartbeater(const FrameworkID& _frameworkId,
-              const HttpConnection& _http,
-              const Duration& _interval)
-    : process::ProcessBase(process::ID::generate("heartbeater")),
-      frameworkId(_frameworkId),
-      http(_http),
-      interval(_interval) {}
-
-protected:
-  virtual void initialize() override
-  {
-    heartbeat();
-  }
-
-private:
-  void heartbeat()
-  {
-    // Only send a heartbeat if the connection is not closed.
-    if (http.closed().isPending()) {
-      VLOG(1) << "Sending heartbeat to " << frameworkId;
-
-      scheduler::Event event;
-      event.set_type(scheduler::Event::HEARTBEAT);
-
-      http.send(event);
-    }
-
-    process::delay(interval, self(), &Self::heartbeat);
-  }
-
-  const FrameworkID frameworkId;
-  HttpConnection http;
-  const Duration interval;
-};
-
-
 // TODO(bmahler): Keeping the task and executor information in sync
 // across the Slave and Framework structs is error prone!
 struct Framework
@@ -2702,8 +2663,8 @@ struct Framework
 
     CHECK_SOME(heartbeater);
 
-    terminate(heartbeater.get().get());
-    wait(heartbeater.get().get());
+    heartbeater->discard();
+    heartbeater->await();
 
     heartbeater = None();
   }
@@ -2713,12 +2674,27 @@ struct Framework
     CHECK_NONE(heartbeater);
     CHECK_SOME(http);
 
-    // TODO(vinod): Make heartbeat interval configurable and include
-    // this information in the SUBSCRIBED response.
-    heartbeater =
-      new Heartbeater(info.id(), http.get(), DEFAULT_HEARTBEAT_INTERVAL);
+    HttpConnection connection = http.get();
+    FrameworkID frameworkId = info.id();
 
-    process::spawn(heartbeater.get().get());
+    heartbeater = process::loop(
+        []() {
+          // TODO(vinod): Make heartbeat interval configurable and
+          // include this information in the SUBSCRIBED response.
+          return process::after(DEFAULT_HEARTBEAT_INTERVAL);
+        },
+        [=](const Nothing&) mutable -> process::ControlFlow<Nothing> {
+          // Only send a heartbeat if the connection is not closed.
+          if (connection.closed().isPending()) {
+            VLOG(1) << "Sending heartbeat to " << frameworkId;
+
+            scheduler::Event event;
+            event.set_type(scheduler::Event::HEARTBEAT);
+
+            connection.send(event);
+          }
+          return process::Continue();
+        });
   }
 
   bool active() const    { return state == ACTIVE; }
@@ -2817,7 +2793,7 @@ struct Framework
   hashmap<SlaveID, Resources> offeredResources;
 
   // This is only set for HTTP frameworks.
-  Option<process::Owned<Heartbeater>> heartbeater;
+  Option<process::Future<Nothing>> heartbeater;
 
 private:
   Framework(Master* const _master,
