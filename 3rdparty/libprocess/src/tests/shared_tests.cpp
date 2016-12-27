@@ -18,6 +18,7 @@
 
 using process::Future;
 using process::Owned;
+using process::Promise;
 using process::Shared;
 
 class Foo
@@ -90,7 +91,7 @@ TEST(SharedTest, Own)
   EXPECT_EQ(42, shared.get()->get());
   EXPECT_TRUE(shared.unique());
 
-  Future<Owned<Foo>> future;
+  Future<Owned<Foo>> future = Promise<Owned<Foo>>().future();
 
   {
     Shared<Foo> shared2(shared);

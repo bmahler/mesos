@@ -17,6 +17,7 @@
 #include <process/clock.hpp>
 #include <process/future.hpp>
 #include <process/gtest.hpp>
+#include <process/owned.hpp>
 
 #include <stout/duration.hpp>
 #include <stout/nothing.hpp>
@@ -25,6 +26,7 @@
 using process::Clock;
 using process::Failure;
 using process::Future;
+using process::Owned;
 using process::Promise;
 
 using std::string;
@@ -544,4 +546,36 @@ TEST(FutureTest, ArrowOperator)
 {
   Future<string> s = string("hello");
   EXPECT_EQ(5u, s->size());
+}
+
+
+TEST(FutureTest, Abandoned)
+{
+  EXPECT_TRUE(Future<int>().isAbandoned());
+
+  Owned<Promise<int>> promise(new Promise<int>());
+
+  Future<int> future = promise->future();
+
+  promise.reset();
+
+  EXPECT_TRUE(future.isAbandoned());
+}
+
+
+TEST(FutureTest, AbandonedChain)
+{
+  Owned<Promise<int>> promise(new Promise<int>());
+
+  Future<string> future = promise->future()
+    .then([]() {
+      return Nothing();
+    })
+    .then([]() -> string {
+      return "hello world";
+    });
+
+  promise.reset();
+
+  EXPECT_TRUE(future.isAbandoned());
 }

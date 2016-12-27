@@ -84,6 +84,7 @@ using process::Owned;
 using process::PID;
 using process::Process;
 using process::ProcessBase;
+using process::Promise;
 using process::run;
 using process::Subprocess;
 using process::TerminateEvent;
@@ -173,9 +174,7 @@ TEST(ProcessTest, THREADSAFE_Dispatch)
 
   dispatch(pid, &DispatchProcess::func0);
 
-  Future<bool> future;
-
-  future = dispatch(pid, &DispatchProcess::func1, true);
+  Future<bool> future = dispatch(pid, &DispatchProcess::func1, true);
 
   EXPECT_TRUE(future.get());
 
@@ -213,7 +212,7 @@ TEST(ProcessTest, THREADSAFE_Defer1)
     func0();
   }
 
-  Future<bool> future;
+  Future<bool> future = Promise<bool>().future();
 
   {
     Deferred<Future<bool>()> func1 =
