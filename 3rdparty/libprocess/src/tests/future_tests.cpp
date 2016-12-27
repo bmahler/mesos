@@ -579,3 +579,57 @@ TEST(FutureTest, AbandonedChain)
 
   EXPECT_TRUE(future.isAbandoned());
 }
+
+
+TEST(FutureTest, RecoverDiscarded)
+{
+  Owned<Promise<int>> promise(new Promise<int>());
+
+  Future<string> future = promise->future()
+    .then([]() -> string {
+      return "hello";
+    })
+    .recover([](const Future<string>&) -> string {
+      return "world";
+    });
+
+  promise->discard();
+
+  AWAIT_EQ("world", future);
+}
+
+
+TEST(FutureTest, RecoverFailed)
+{
+  Owned<Promise<int>> promise(new Promise<int>());
+
+  Future<string> future = promise->future()
+    .then([]() -> string {
+      return "hello";
+    })
+    .recover([](const Future<string>&) -> string {
+      return "world";
+    });
+
+  promise->fail("Failure");
+
+  AWAIT_EQ("world", future);
+}
+
+
+TEST(FutureTest, RecoverAbandoned)
+{
+  Owned<Promise<int>> promise(new Promise<int>());
+
+  Future<string> future = promise->future()
+    .then([]() -> string {
+      return "hello";
+    })
+    .recover([](const Future<string>&) -> string {
+      return "world";
+    });
+
+  promise.reset();
+
+  AWAIT_EQ("world", future);
+}

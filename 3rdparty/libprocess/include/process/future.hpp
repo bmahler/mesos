@@ -433,6 +433,18 @@ public:
     return then(std::forward<F>(f), Prefer());
   }
 
+  // Installs callbacks that get executed if this future is abandoned,
+  // is discarded, or failed.
+  template <typename F>
+  Future<T> recover(F&& f) const;
+
+  template <typename F>
+  Future<T> recover(_Deferred<F>&& deferred) const
+  {
+    return recover(
+        deferred.operator std::function<Future<T>(const Future<T>&)>());
+  }
+
   // TODO(benh): Considering adding a `rescue` function for rescuing
   // abandoned futures.
 
@@ -1540,6 +1552,35 @@ Future<X> Future<T>::then(const lambda::function<X(const T&)>& f) const
 
   onAbandoned([=]() {
     promise->future().abandon();
+  });
+
+  // Propagate discarding up the chain. To avoid cyclic dependencies,
+  // we keep a weak future in the callback.
+  promise->future().onDiscard(
+      lambda::bind(&internal::discard<T>, WeakFuture<T>(*this)));
+
+  return promise->future();
+}
+
+
+template <typename T>
+template <typename F>
+Future<T> Future<T>::recover(F&& f) const
+{
+  std::shared_ptr<Promise<T>> promise(new Promise<T>());
+
+  const Future<T> future = *this;
+
+  onAny([=]() {
+    if (future.isDiscarded() || future.isFailed()) {
+      promise->set(f(future));
+    } else {
+      promise->associate(future);
+    }
+  });
+
+  onAbandoned([=]() {
+    promise->set(f(future));
   });
 
   // Propagate discarding up the chain. To avoid cyclic dependencies,
