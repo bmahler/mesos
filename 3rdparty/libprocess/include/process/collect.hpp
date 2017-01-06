@@ -154,11 +154,14 @@ private:
 
   void discarded()
   {
-    promise->discard();
-
     foreach (Future<T> future, futures) {
       future.discard();
     }
+
+    // NOTE: we discard the promise after we set discard on each of
+    // the futures so that there is a happens-before relationship that
+    // can be assumed by callers.
+    promise->discard();
 
     terminate(this);
   }
@@ -230,11 +233,14 @@ private:
 
   void discarded()
   {
-    promise->discard();
-
     foreach (Future<T> future, futures) {
       future.discard();
     }
+
+    // NOTE: we discard the promise after we set discard on each of
+    // the futures so that there is a happens-before relationship that
+    // can be assumed by callers.
+    promise->discard();
 
     terminate(this);
   }
