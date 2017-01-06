@@ -43,6 +43,7 @@
 #include <stout/result_of.hpp>
 #include <stout/synchronized.hpp>
 #include <stout/try.hpp>
+#include <stout/unreachable.hpp>
 
 #include <stout/os/strerror.hpp>
 
@@ -150,6 +151,10 @@ public:
   // until a value gets associated or until the future is discarded.
   const T& get() const;
   const T* operator->() const;
+
+  // Returns the current "condition" of this future, i.e., if it's
+  // abandoned, in pending, ready, discarded, or a failure.
+  const std::string condition() const;
 
   // Returns the failure message associated with this future.
   const std::string& failure() const;
@@ -1269,6 +1274,26 @@ const std::string& Future<T>::failure() const
 
   CHECK_ERROR(data->result);
   return data->result.error();
+}
+
+
+template <typename T>
+const std::string Future<T>::condition() const
+{
+  std::string suffix = data->discard ? " (with discard)" : "";
+
+  if (data->abandoned) {
+    return "Abandoned" + suffix;
+  }
+
+  switch (data->state) {
+    case PENDING: return "Pending" + suffix;
+    case READY: return "Ready" + suffix;
+    case FAILED: return "Failed" + suffix + ": " + failure();
+    case DISCARDED: return "Discarded" + suffix;
+  }
+
+  UNREACHABLE();
 }
 
 
