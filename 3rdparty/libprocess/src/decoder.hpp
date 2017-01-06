@@ -552,13 +552,15 @@ public:
     size_t parsed = http_parser_execute(&parser, &settings, data, length);
 
     if (parsed != length) {
-      // TODO(bmahler): joyent/http-parser exposes error reasons.
+      std::string error  = http_errno_description(HTTP_PARSER_ERRNO(&parser));
+      VLOG(2) << "Failed to decode HTTP response body: " << error;
+
       failure = true;
 
       // If we're still writing the body, fail the writer!
       if (writer.isSome()) {
         http::Pipe::Writer writer_ = writer.get(); // Remove const.
-        writer_.fail("failed to decode body");
+        writer_.fail("Failed to decode HTTP response body: " + error);
         writer = None();
       }
     }
@@ -802,13 +804,15 @@ public:
   {
     size_t parsed = http_parser_execute(&parser, &settings, data, length);
     if (parsed != length) {
-      // TODO(bmahler): joyent/http-parser exposes error reasons.
+      std::string error  = http_errno_description(HTTP_PARSER_ERRNO(&parser));
+      VLOG(2) << "Failed to decode HTTP request body: " << error;
+
       failure = true;
 
       // If we're still writing the body, fail the writer!
       if (writer.isSome()) {
         http::Pipe::Writer writer_ = writer.get(); // Remove const.
-        writer_.fail("failed to decode body");
+        writer_.fail("Failed to decode HTTP request body: " + error);
         writer = None();
       }
     }

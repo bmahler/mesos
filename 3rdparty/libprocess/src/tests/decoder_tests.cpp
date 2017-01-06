@@ -306,7 +306,9 @@ TEST(DecoderTest, StreamingResponseFailure)
   EXPECT_FALSE(decoder.writingBody());
 
   EXPECT_TRUE(read.isFailed());
-  EXPECT_EQ("failed to decode body", read.failure());
+  EXPECT_TRUE(strings::startsWith(
+      read.failure(),
+      "Failed to decode HTTP response body: "));
 }
 
 
