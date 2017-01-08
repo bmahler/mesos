@@ -55,8 +55,8 @@
 #include "encoder.hpp"
 
 namespace authentication = process::http::authentication;
-namespace ID = process::ID;
 namespace http = process::http;
+namespace ID = process::ID;
 namespace inet = process::network::inet;
 namespace inet4 = process::network::inet4;
 namespace network = process::network;
@@ -2340,3 +2340,250 @@ TEST_F(HttpServeTest, Unix)
   AWAIT_READY(serve);
 }
 #endif // __WINDOWS__
+
+
+TEST(HttpServerTest, Stop)
+{
+  Try<inet::Socket> socket = inet::Socket::create();
+  ASSERT_SOME(socket);
+
+  ASSERT_SOME(socket->bind(inet4::Address::ANY_ANY()));
+
+  class Handler
+  {
+  public:
+    MOCK_METHOD1(handle, Future<http::Response>(const http::Request&));
+  } handler;
+
+  Try<http::Server> server = http::Server::create(
+      socket.get(),
+      [&](const network::Socket&, const http::Request& request) {
+        return handler.handle(request);
+      });
+
+  ASSERT_SOME(server);
+
+  EXPECT_CALL(handler, handle(_))
+    .Times(0);
+
+  Future<Nothing> run = server->run();
+
+  AWAIT_READY(server->stop());
+
+  AWAIT_READY(run);
+}
+
+
+// On OS X we can't do a shutdown on a listening socket (i.e., "server
+// socket") because BSD doesn't consider that socket as connected and
+// it will return an error ENOCONN "Socket is not connected". Thus, we
+// don't run this test on OS X.
+#ifndef __APPLE__
+TEST(HttpServerTest, Shutdown)
+{
+  Try<inet::Socket> socket = inet::Socket::create();
+  ASSERT_SOME(socket);
+
+  ASSERT_SOME(socket->bind(inet4::Address::ANY_ANY()));
+
+  Try<inet::Address> address = socket->address();
+
+  class Handler
+  {
+  public:
+    MOCK_METHOD1(handle, Future<http::Response>(const http::Request&));
+  } handler;
+
+  Try<http::Server> server = http::Server::create(
+      socket.get(),
+      [&](const network::Socket&, const http::Request& request) {
+        return handler.handle(request);
+      });
+
+  ASSERT_SOME(server);
+
+  EXPECT_CALL(handler, handle(_))
+    .Times(0);
+
+  Future<Nothing> run = server->run();
+
+  // NOTE: we can't guarantee that after the call to `server->run` the
+  // server is actually running because the actor might not yet have
+  // received the asynchronous dispatch. Thus, we need some happens
+  // before guarantee that the server is running which we get by
+  // making a connection. We then use that connection to properly test
+  // that we shutdown each client below.
+  Future<http::Connection> connect =
+    http::connect(address.get(), http::Scheme::HTTP);
+
+  AWAIT_READY(connect);
+
+  http::Connection connection = connect.get();
+
+  EXPECT_SOME(socket->shutdown(inet::Socket::Shutdown::READ_WRITE));
+
+  AWAIT_FAILED(run);
+  AWAIT_READY(connection.disconnected());
+}
+#endif // __APPLE__
+
+
+// Tests that if the server gets terminated due to the process getting
+// cleaned up then we'll shutdown existing clients and (at least on
+// Linux) nobody else will be able to connect.
+TEST(HttpServerTest, Terminated)
+{
+  Future<Nothing> disconnected = Nothing();
+
+  Try<inet::Socket> socket = inet::Socket::create();
+  ASSERT_SOME(socket);
+
+  ASSERT_SOME(socket->bind(inet4::Address::ANY_ANY()));
+
+  Try<inet::Address> address = socket->address();
+
+  {
+    class Handler
+    {
+    public:
+      MOCK_METHOD1(handle, Future<http::Response>(const http::Request&));
+    } handler;
+
+    Try<http::Server> server = http::Server::create(
+        socket.get(),
+        [&](const network::Socket&, const http::Request& request) {
+          return handler.handle(request);
+        });
+
+    ASSERT_SOME(server);
+
+    EXPECT_CALL(handler, handle(_))
+      .Times(0);
+
+    Future<Nothing> run = server->run();
+
+    // NOTE: we can't guarantee that after the call to `server->run`
+    // the server is actually running because the actor might not yet
+    // have received the asynchronous dispatch. Thus, we need some
+    // happens before guarantee that the server is running which we
+    // get by making a connection. We then use that connection to
+    // properly test that we shutdown each client below.
+    Future<http::Connection> connect =
+      http::connect(address.get(), http::Scheme::HTTP);
+
+    AWAIT_READY(connect);
+
+    http::Connection connection = connect.get();
+
+    disconnected = connection.disconnected();
+
+    EXPECT_TRUE(disconnected.isPending());
+  }
+
+  AWAIT_READY(disconnected);
+
+  // On Linux we shouldn't be able to make another connection because
+  // we actually shutdown the socket but on OS X a connection would
+  // just queue since there is no way to shutdown a "server" socket.
+#ifndef __APPLE__
+  AWAIT_FAILED(http::connect(address.get(), http::Scheme::HTTP));
+#endif // __APPLE__
+}
+
+
+TEST(HttpServerTest, Pipeline)
+{
+  class Handler
+  {
+  public:
+    MOCK_METHOD1(handle, Future<http::Response>(const http::Request&));
+  } handler;
+
+  Try<http::Server> server = http::Server::create(
+      inet4::Address::ANY_ANY(),
+      [&](const network::Socket&, const http::Request& request) {
+        return handler.handle(request);
+      });
+
+  ASSERT_SOME(server);
+
+  Future<Nothing> run = server->run();
+
+  Future<inet::Address> address = server->address()
+    .then([](const network::Address& address) -> Future<inet::Address> {
+      return network::convert<inet::Address>(address);
+    });
+
+  AWAIT_READY(address);
+
+  Future<http::Connection> connect =
+    http::connect(address.get(), http::Scheme::HTTP);
+
+  AWAIT_READY(connect);
+
+  http::Connection connection = connect.get();
+
+  Promise<http::Response> promise1;
+  Future<http::Request> request1;
+
+  Promise<http::Response> promise2;
+  Future<http::Request> request2;
+
+  Promise<http::Response> promise3;
+  Future<http::Request> request3;
+
+  EXPECT_CALL(handler, handle(_))
+    .WillOnce(DoAll(FutureArg<0>(&request1), Return(promise1.future())))
+    .WillOnce(DoAll(FutureArg<0>(&request2), Return(promise2.future())))
+    .WillOnce(DoAll(FutureArg<0>(&request3), Return(promise3.future())))
+    .WillRepeatedly(Return(http::OK()));
+
+  http::URL url("http", address->hostname().get(), address->port, "/");
+
+  http::Request request;
+  request.method = "GET";
+  request.url = url;
+  request.keepAlive = true;
+
+  Future<http::Response> response1 = connection.send(request);
+  Future<http::Response> response2 = connection.send(request);
+  Future<http::Response> response3 = connection.send(request);
+
+  AWAIT_READY(request1);
+  AWAIT_READY(request2);
+  AWAIT_READY(request3);
+
+  ASSERT_TRUE(response1.isPending());
+  ASSERT_TRUE(response2.isPending());
+  ASSERT_TRUE(response3.isPending());
+
+  promise3.set(http::OK("3"));
+
+  ASSERT_TRUE(response1.isPending());
+  ASSERT_TRUE(response2.isPending());
+  ASSERT_TRUE(response3.isPending());
+
+  promise1.set(http::OK("1"));
+
+  AWAIT_READY(response1);
+  EXPECT_EQ("1", response1->body);
+
+  ASSERT_TRUE(response2.isPending());
+  ASSERT_TRUE(response3.isPending());
+
+  promise2.set(http::OK("2"));
+
+  AWAIT_READY(response2);
+  EXPECT_EQ("2", response2->body);
+
+  AWAIT_READY(response3);
+  EXPECT_EQ("3", response3->body);
+
+  AWAIT_READY(connection.disconnect());
+
+  ASSERT_TRUE(run.isPending());
+
+  AWAIT_READY(server->stop());
+
+  AWAIT_READY(run);
+}
