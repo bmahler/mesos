@@ -2392,6 +2392,154 @@ TEST(ResourcesOperationTest, CreateSharedPersistentVolume)
 }
 
 
+// Operations can contain allocated or unallocated resources.
+// When applying an operation, the cases that are interesting
+// are those that mix allocated and unallocated resources:
+//
+//   (1) Operations with unallocated resources are being applied
+//       to allocated resources: we allow this only if the
+//       operation is unambiguous, that is, the allocated resources
+//       are only allocated to a single role.
+//
+//   (2) Operations with allocated resources are being applied
+//       to unallocated resources: in this case we simply ignore
+//       the allocation information.
+//
+// This tests both cases.
+TEST(ResourcesOperationTest, ApplyWithAllocationInfo)
+{
+  auto unallocated = [](const Resources& resources) {
+    Resources result = resources;
+    result.unallocate();
+    return result;
+  };
+
+  // Case (1).
+  {
+    // Apply a RESERVE -> CREATE -> DESTROY -> UNRESERVE sequence
+    // of operations with unallocated resources to allocated resources.
+    Resources total = AllocatedResources(
+        Resources::parse("cpus:1;mem:500;disk:1000").get(), "role");
+
+    // Apply the RESERVE with unallocated resources.
+    Offer::Operation reserve;
+    reserve.set_type(Offer::Operation::RESERVE);
+    reserve.mutable_reserve()->mutable_resources()
+      ->CopyFrom(unallocated(total));
+
+    for (int i = 0; i < reserve.reserve().resources_size(); ++i) {
+      Resource* resource = reserve.mutable_reserve()->mutable_resources(i);
+
+      resource->mutable_reservation();
+      resource->set_role("role");
+    }
+
+    Try<Resources> applied = total.apply(reserve);
+    EXPECT_SOME_EQ(
+        AllocatedResources(reserve.reserve().resources(), "role"),
+        applied);
+
+    // Apply the CREATE with unallocated resources.
+    Resources disk = Resources(reserve.reserve().resources()).filter(
+        [](const Resource& r) { return r.name() == "disk"; });
+    Resources nonDisk = Resources(reserve.reserve().resources()).filter(
+        [](const Resource& r) { return r.name() != "disk"; });
+
+    ASSERT_EQ(1u, disk.size());
+
+    Resource volume = *disk.begin();
+    volume.mutable_disk()->mutable_persistence()->set_id("id");
+
+    Offer::Operation create;
+    create.set_type(Offer::Operation::CREATE);
+    create.mutable_create()->add_volumes()->CopyFrom(volume);
+
+    applied = applied->apply(create);
+    EXPECT_SOME_EQ(AllocatedResources(nonDisk + volume, "role"), applied);
+
+    // Apply the DESTROY with unallocated resources.
+    Offer::Operation destroy;
+    destroy.set_type(Offer::Operation::DESTROY);
+    destroy.mutable_destroy()->mutable_volumes()->CopyFrom(
+        create.create().volumes());
+
+    applied = applied->apply(destroy);
+    EXPECT_SOME_EQ(
+        AllocatedResources(reserve.reserve().resources(), "role"),
+        applied);
+
+    // Apply the UNRESERVE with unallocated resources.
+    Offer::Operation unreserve;
+    unreserve.set_type(Offer::Operation::UNRESERVE);
+    unreserve.mutable_unreserve()->mutable_resources()->CopyFrom(
+        reserve.reserve().resources());
+
+    applied = applied->apply(unreserve);
+    EXPECT_SOME_EQ(total, applied);
+  }
+
+  // Case (2).
+  {
+    // Apply a RESERVE -> CREATE -> DESTROY -> UNRESERVE sequence
+    // of operations with allocated resources to unallocated resources.
+    Resources total = Resources::parse("cpus:1;mem:500;disk:1000").get();
+
+    // Apply the RESERVE with allocated resources.
+    Offer::Operation reserve;
+    reserve.set_type(Offer::Operation::RESERVE);
+    reserve.mutable_reserve()->mutable_resources()->CopyFrom(total);
+
+    for (int i = 0; i < reserve.reserve().resources_size(); ++i) {
+      Resource* resource = reserve.mutable_reserve()->mutable_resources(i);
+
+      resource->mutable_reservation();
+      resource->set_role("role");
+
+      resource->mutable_allocation_info()->set_role("role");
+    }
+
+    Try<Resources> applied = total.apply(reserve);
+    EXPECT_SOME_EQ(unallocated(reserve.reserve().resources()), applied);
+
+    // Apply the CREATE with allocated resources.
+    Resources disk = Resources(reserve.reserve().resources()).filter(
+        [](const Resource& r) { return r.name() == "disk"; });
+    Resources nonDisk = Resources(reserve.reserve().resources()).filter(
+        [](const Resource& r) { return r.name() != "disk"; });
+
+    ASSERT_EQ(1u, disk.size());
+
+    Resource volume = *disk.begin();
+    volume.mutable_disk()->mutable_persistence()->set_id("id");
+
+    Offer::Operation create;
+    create.set_type(Offer::Operation::CREATE);
+    create.mutable_create()->add_volumes()->CopyFrom(volume);
+
+    applied = applied->apply(create);
+    EXPECT_SOME_EQ(unallocated(nonDisk + volume), applied);
+
+    // Apply the DESTROY with allocated resources.
+    Offer::Operation destroy;
+    destroy.set_type(Offer::Operation::DESTROY);
+    destroy.mutable_destroy()->mutable_volumes()->CopyFrom(
+        create.create().volumes());
+
+    applied = applied->apply(destroy);
+    EXPECT_SOME_EQ(unallocated(reserve.reserve().resources()), applied);
+
+    // Apply the UNRESERVE with allocated resources.
+    Offer::Operation unreserve;
+    unreserve.set_type(Offer::Operation::UNRESERVE);
+    unreserve.mutable_unreserve()->mutable_resources()->CopyFrom(
+        reserve.reserve().resources());
+
+    applied = applied->apply(unreserve);
+    EXPECT_SOME_EQ(total, applied);
+  }
+}
+
+
 TEST(ResourcesOperationTest, FlattenResources)
 {
   Resources unreservedCpus = Resources::parse("cpus:1").get();

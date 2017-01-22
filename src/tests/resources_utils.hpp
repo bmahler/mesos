@@ -17,14 +17,54 @@
 #ifndef __TESTS_RESOURCES_UTILS_HPP__
 #define __TESTS_RESOURCES_UTILS_HPP__
 
+#include <ostream>
+
 #include <mesos/mesos.hpp>
 #include <mesos/resources.hpp>
 
 #include <stout/try.hpp>
 
+using std::ostream;
+
 namespace mesos {
 namespace internal {
 namespace tests {
+
+// TODO(bmahler): This is a wrapper to simplify the test logic.
+// Consider adding a top-level AllocatedResources that has the
+// invariant that all resources contained within it have an
+// `AllocationInfo` set. This class could prevent malformed
+// operations between `Resources` and `AllocatedResources`,
+// and could clarify interfaces that take allocated resources
+// (e.g. allocator, sorter, etc).
+class AllocatedResources
+{
+public:
+  AllocatedResources(const Resources& resources_, const std::string& role)
+    : resources(resources_)
+  {
+    resources.allocate(role);
+  }
+
+  operator Resources() const
+  {
+    return resources;
+  }
+
+  bool operator==(const Resources& other) const
+  {
+    return resources == other;
+  }
+
+  ostream& operator<<(ostream& out) const
+  {
+    return out << resources;
+  }
+
+private:
+  Resources resources;
+};
+
 
 // Creates a "ports(*)" resource for the given ranges.
 Resource createPorts(const ::mesos::Value::Ranges& ranges);

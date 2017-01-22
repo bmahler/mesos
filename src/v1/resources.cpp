@@ -1248,6 +1248,59 @@ Option<Resources> Resources::find(const Resources& targets) const
 
 Try<Resources> Resources::apply(const Offer::Operation& operation) const
 {
+  // Previously, `Resource` did not contain `AllocationInfo`.
+  // So for backwards compatibility with old schedulers and
+  // tooling, we must allow operations to contain `Resource`s
+  // without an allocation role. The two interesting cases
+  // for adjusting the operation's resource are:
+  //
+  // (1) The operation `Resource` does not contain an
+  //     `AllocationInfo` but is being applied to an allocated
+  //     `Resources`. We allow this only if the operation is
+  //     unambiguous, that is, the allocated `Resources` are
+  //     only allocated to a single role.
+  //
+  // (2) The operation `Resource` contains an `AllocationInfo`
+  //     but is being applied to an unallocated `Resources`.
+  //     In this case we simply ignore the `AllocationInfo`
+  //     of the `Resource`.
+  //
+  // Note that we assume no `Resources` store a mix of
+  // allocated and unallocated resources, which is brittle
+  // and enforcement of this invariant should be added.
+
+  bool isAllocated = [](const Resources& resources) {
+    foreach (const Resource& resource, resources) {
+      if (resource.has_allocation_info()) {
+        return true;
+      }
+    }
+    return false;
+  }(*this);
+
+  // Returns the resource adjusted per cases (1) and (2) above.
+  auto adjustedResource = [this, isAllocated](Resource resource)
+      -> Try<Resource> {
+    if (!resource.has_allocation_info() && isAllocated) {
+      // Per case (1) above, we only allow this if the operation
+      // is unambiguous, that is, 'this' is allocated to only a
+      // single role.
+      hashmap<string, Resources> allocations_ = allocations();
+
+      if (allocations_.size() > 1) {
+        return Error("Operation omits allocation role but is being"
+                     " applied to resources allocated to multiple roles");
+      }
+
+      resource.mutable_allocation_info()->set_role(allocations_.begin()->first);
+    } else if (resource.has_allocation_info() && !isAllocated) {
+      // Strip the `AllocationInfo` per case (2) above.
+      resource.clear_allocation_info();
+    }
+
+    return resource;
+  };
+
   Resources result = *this;
 
   switch (operation.type()) {
@@ -1272,7 +1325,13 @@ Try<Resources> Resources::apply(const Offer::Operation& operation) const
           return Error("Invalid RESERVE Operation: Missing 'reservation'");
         }
 
-        Resources unreserved = Resources(reserved).flatten();
+        Try<Resource> adjustedReservation = adjustedResource(reserved);
+        if (adjustedReservation.isError()) {
+          return Error("Invalid RESERVE Operation: " +
+                       adjustedReservation.error());
+        }
+
+        Resources unreserved = Resources(adjustedReservation.get()).flatten();
 
         if (!result.contains(unreserved)) {
           return Error("Invalid RESERVE Operation: " + stringify(result) +
@@ -1280,7 +1339,7 @@ Try<Resources> Resources::apply(const Offer::Operation& operation) const
         }
 
         result -= unreserved;
-        result.add(reserved);
+        result.add(adjustedReservation.get());
       }
       break;
     }
@@ -1298,14 +1357,21 @@ Try<Resources> Resources::apply(const Offer::Operation& operation) const
           return Error("Invalid UNRESERVE Operation: Missing 'reservation'");
         }
 
-        if (!result.contains(reserved)) {
-          return Error("Invalid UNRESERVE Operation: " + stringify(result) +
-                       " does not contain " + stringify(reserved));
+        Try<Resource> adjustedReservation = adjustedResource(reserved);
+        if (adjustedReservation.isError()) {
+          return Error("Invalid UNRESERVE Operation: " +
+                       adjustedReservation.error());
         }
 
-        Resources unreserved = Resources(reserved).flatten();
+        if (!result.contains(adjustedReservation.get())) {
+          return Error("Invalid UNRESERVE Operation: " + stringify(result) +
+                       " does not contain " +
+                       stringify(adjustedReservation.get()));
+        }
 
-        result.subtract(reserved);
+        Resources unreserved = Resources(adjustedReservation.get()).flatten();
+
+        result.subtract(adjustedReservation.get());
         result += unreserved;
       }
       break;
@@ -1324,13 +1390,18 @@ Try<Resources> Resources::apply(const Offer::Operation& operation) const
           return Error("Invalid CREATE Operation: Missing 'persistence'");
         }
 
+        Try<Resource> adjustedVolume = adjustedResource(volume);
+        if (adjustedVolume.isError()) {
+          return Error("Invalid CREATE Operation: " + adjustedVolume.error());
+        }
+
         // Strip persistence and volume from the disk info so that we
         // can subtract it from the original resources.
         // TODO(jieyu): Non-persistent volumes are not supported for
         // now. Persistent volumes can only be be created from regular
         // disk resources. Revisit this once we start to support
         // non-persistent volumes.
-        Resource stripped = volume;
+        Resource stripped = adjustedVolume.get();
 
         if (stripped.disk().has_source()) {
           stripped.mutable_disk()->clear_persistence();
@@ -1345,11 +1416,12 @@ Try<Resources> Resources::apply(const Offer::Operation& operation) const
 
         if (!result.contains(stripped)) {
           return Error("Invalid CREATE Operation: Insufficient disk resources"
-                       " for persistent volume " + stringify(volume));
+                       " for persistent volume " +
+                       stringify(adjustedVolume.get()));
         }
 
         result.subtract(stripped);
-        result.add(volume);
+        result.add(adjustedVolume.get());
       }
       break;
     }
@@ -1367,14 +1439,19 @@ Try<Resources> Resources::apply(const Offer::Operation& operation) const
           return Error("Invalid DESTROY Operation: Missing 'persistence'");
         }
 
-        if (!result.contains(volume)) {
+        Try<Resource> adjustedVolume = adjustedResource(volume);
+        if (adjustedVolume.isError()) {
+          return Error("Invalid DESTROY Operation: " + adjustedVolume.error());
+        }
+
+        if (!result.contains(adjustedVolume.get())) {
           return Error(
               "Invalid DESTROY Operation: Persistent volume does not exist");
         }
 
         // Strip persistence and volume from the disk info so that we
         // can subtract it from the original resources.
-        Resource stripped = volume;
+        Resource stripped = adjustedVolume.get();
 
         if (stripped.disk().has_source()) {
           stripped.mutable_disk()->clear_persistence();
@@ -1387,7 +1464,7 @@ Try<Resources> Resources::apply(const Offer::Operation& operation) const
         // return the resource to non-shared state after destroy.
         stripped.clear_shared();
 
-        result.subtract(volume);
+        result.subtract(adjustedVolume.get());
         result.add(stripped);
       }
       break;
