@@ -329,6 +329,125 @@ Label createLabel(const string& key, const Option<string>& value)
 }
 
 
+Offer::Operation adjustOfferOperation(
+    const Offer::Operation& operation,
+    const Resource::AllocationInfo& allocationInfo)
+{
+  Offer::Operation result = operation;
+
+  switch (operation.type()) {
+    case Offer::Operation::LAUNCH: {
+      for (int i = 0; i < result.launch().task_infos_size(); ++i) {
+        TaskInfo* task = result.mutable_launch()->mutable_task_infos(i);
+
+        for (int j = 0; j < task->resources_size(); ++j) {
+          Resource* resource = task->mutable_resources(j);
+          if (!resource->has_allocation_info()) {
+            resource->mutable_allocation_info()->CopyFrom(allocationInfo);
+          }
+        }
+
+        if (task->has_executor()) {
+          ExecutorInfo* executor = task->mutable_executor();
+
+          for (int j = 0; j < executor->resources_size(); ++j) {
+            Resource* resource = executor->mutable_resources(j);
+            if (!resource->has_allocation_info()) {
+              resource->mutable_allocation_info()->CopyFrom(allocationInfo);
+            }
+          }
+        }
+      }
+      break;
+    }
+
+    case Offer::Operation::LAUNCH_GROUP: {
+      if (result.launch_group().has_executor()) {
+        ExecutorInfo* executor =
+          result.mutable_launch_group()->mutable_executor();
+
+        for (int j = 0; j < executor->resources_size(); ++j) {
+          Resource* resource = executor->mutable_resources(j);
+          if (!resource->has_allocation_info()) {
+            resource->mutable_allocation_info()->CopyFrom(allocationInfo);
+          }
+        }
+      }
+
+      const int size = result.launch_group().task_group().tasks_size();
+      for (int i = 0; i < size; ++i) {
+        TaskInfo* task =
+          result.mutable_launch_group()->mutable_task_group()->mutable_tasks(i);
+
+        for (int j = 0; j < task->resources_size(); ++j) {
+          Resource* resource = task->mutable_resources(j);
+          if (!resource->has_allocation_info()) {
+            resource->mutable_allocation_info()->CopyFrom(allocationInfo);
+          }
+        }
+
+        if (task->has_executor()) {
+          ExecutorInfo* executor = task->mutable_executor();
+
+          for (int j = 0; j < executor->resources_size(); ++j) {
+            Resource* resource = executor->mutable_resources(j);
+            if (!resource->has_allocation_info()) {
+              resource->mutable_allocation_info()->CopyFrom(allocationInfo);
+            }
+          }
+        }
+      }
+      break;
+    }
+
+    case Offer::Operation::RESERVE: {
+      for (int j = 0; j < result.reserve().resources_size(); ++j) {
+        Resource* resource = result.mutable_reserve()->mutable_resources(j);
+        if (!resource->has_allocation_info()) {
+          resource->mutable_allocation_info()->CopyFrom(allocationInfo);
+        }
+      }
+      break;
+    }
+
+    case Offer::Operation::UNRESERVE: {
+      for (int j = 0; j < result.unreserve().resources_size(); ++j) {
+        Resource* resource = result.mutable_unreserve()->mutable_resources(j);
+        if (!resource->has_allocation_info()) {
+          resource->mutable_allocation_info()->CopyFrom(allocationInfo);
+        }
+      }
+      break;
+    }
+
+    case Offer::Operation::CREATE: {
+      for (int j = 0; j < result.create().volumes_size(); ++j) {
+        Resource* resource = result.mutable_create()->mutable_volumes(j);
+        if (!resource->has_allocation_info()) {
+          resource->mutable_allocation_info()->CopyFrom(allocationInfo);
+        }
+      }
+      break;
+    }
+
+    case Offer::Operation::DESTROY: {
+      for (int j = 0; j < result.destroy().volumes_size(); ++j) {
+        Resource* resource = result.mutable_destroy()->mutable_volumes(j);
+        if (!resource->has_allocation_info()) {
+          resource->mutable_allocation_info()->CopyFrom(allocationInfo);
+        }
+      }
+      break;
+    }
+
+    case Offer::Operation::UNKNOWN:
+      break; // No-op.
+  }
+
+  return result;
+}
+
+
 TimeInfo getCurrentTime()
 {
   TimeInfo timeInfo;
