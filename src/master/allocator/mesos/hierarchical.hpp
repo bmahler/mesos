@@ -95,7 +95,8 @@ public:
       const Duration& allocationInterval,
       const lambda::function<
           void(const FrameworkID&,
-               const hashmap<SlaveID, Resources>&)>& offerCallback,
+               const hashmap<std::string, hashmap<SlaveID, Resources>>&)>&
+                   offerCallback,
       const lambda::function<
           void(const FrameworkID&,
                const hashmap<SlaveID, UnavailableResources>&)>&
@@ -186,9 +187,11 @@ public:
       const Resources& resources,
       const Option<Filters>& filters);
 
+  // TODO(bmahler): Update to take optional Suppress.role.
   void suppressOffers(
       const FrameworkID& frameworkId);
 
+  // TODO(bmahler): Update to take optional Revive.role.
   void reviveOffers(
       const FrameworkID& frameworkId);
 
@@ -229,6 +232,7 @@ protected:
   // Remove an offer filter for the specified framework.
   void expire(
       const FrameworkID& frameworkId,
+      const std::string& role,
       const SlaveID& slaveId,
       OfferFilter* offerFilter);
 
@@ -248,6 +252,7 @@ protected:
   // on this slave.
   bool isFiltered(
       const FrameworkID& frameworkId,
+      const std::string& role,
       const SlaveID& slaveId,
       const Resources& resources) const;
 
@@ -269,11 +274,13 @@ protected:
 
   lambda::function<
       void(const FrameworkID&,
-           const hashmap<SlaveID, Resources>&)> offerCallback;
+           const hashmap<std::string, hashmap<SlaveID, Resources>>&)>
+    offerCallback;
 
   lambda::function<
       void(const FrameworkID&,
-           const hashmap<SlaveID, UnavailableResources>&)> inverseOfferCallback;
+           const hashmap<SlaveID, UnavailableResources>&)>
+    inverseOfferCallback;
 
   friend Metrics;
   Metrics metrics;
@@ -282,7 +289,7 @@ protected:
   {
     Framework(const FrameworkInfo& frameworkInfo);
 
-    std::string role;
+    std::set<std::string> roles;
 
     // Whether the framework suppresses offers.
     bool suppressed;
@@ -290,7 +297,9 @@ protected:
     protobuf::framework::Capabilities capabilities;
 
     // Active offer and inverse offer filters for the framework.
-    hashmap<SlaveID, hashset<OfferFilter*>> offerFilters;
+    // Offer filters are tied to the role the filtered resources
+    // were allocated to.
+    hashmap<std::string, hashmap<SlaveID, hashset<OfferFilter*>>> offerFilters;
     hashmap<SlaveID, hashset<InverseOfferFilter*>> inverseOfferFilters;
   };
 
@@ -341,7 +350,12 @@ protected:
     // In this case, allocated > total.
     Resources available() const
     {
-      return total - allocated;
+      // In order to subtract from the total,
+      // we strip the allocation information.
+      Resources strippedAllocation = allocated;
+      strippedAllocation.unallocate();
+
+      return total - strippedAllocation;
     }
 
     bool activated;  // Whether to offer resources.

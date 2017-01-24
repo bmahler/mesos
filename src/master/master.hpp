@@ -561,7 +561,7 @@ public:
 
   void offer(
       const FrameworkID& frameworkId,
-      const hashmap<SlaveID, Resources>& resources);
+      const hashmap<std::string, hashmap<SlaveID, Resources>>& resources);
 
   void inverseOffer(
       const FrameworkID& frameworkId,
