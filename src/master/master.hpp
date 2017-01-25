@@ -260,6 +260,12 @@ struct Slave
       << "Duplicate executor '" << executorInfo.executor_id()
       << "' of framework " << frameworkId;
 
+    // Verify that Resource.AllocationInfo is set,
+    // this should be guaranteed by the master.
+    foreach (const Resource& resource, executorInfo.resources()) {
+      CHECK(resource.has_allocation_info());
+    }
+
     executors[frameworkId][executorInfo.executor_id()] = executorInfo;
     usedResources[frameworkId] += executorInfo.resources();
   }
@@ -322,6 +328,9 @@ struct Slave
   Option<process::Timer> reregistrationTimer;
 
   // Executors running on this slave.
+  //
+  // TODO(bmahler): Make this private to enforce addExecutor is used,
+  // and provide a const view into the executors.
   hashmap<FrameworkID, hashmap<ExecutorID, ExecutorInfo>> executors;
 
   // Tasks that have not yet been launched because they are currently
@@ -331,6 +340,10 @@ struct Slave
   hashmap<FrameworkID, hashmap<TaskID, TaskInfo>> pendingTasks;
 
   // Tasks present on this slave.
+  //
+  // TODO(bmahler): Make this private to enforce addTask is used,
+  // and provide a const view into the tasks.
+  //
   // TODO(bmahler): The task pointer ownership complexity arises from the fact
   // that we own the pointer here, but it's shared with the Framework struct.
   // We should find a way to eliminate this.
@@ -2305,6 +2318,12 @@ struct Framework
       << "Duplicate task " << task->task_id()
       << " of framework " << task->framework_id();
 
+    // Verify that Resource.AllocationInfo is set,
+    // this should be guaranteed by the master.
+    foreach (const Resource& resource, task->resources()) {
+      CHECK(resource.has_allocation_info());
+    }
+
     tasks[task->task_id()] = task;
 
     if (!protobuf::isTerminalState(task->state())) {
@@ -2430,6 +2449,12 @@ struct Framework
     CHECK(!hasExecutor(slaveId, executorInfo.executor_id()))
       << "Duplicate executor '" << executorInfo.executor_id()
       << "' on agent " << slaveId;
+
+    // Verify that Resource.AllocationInfo is set,
+    // this should be guaranteed by the master.
+    foreach (const Resource& resource, executorInfo.resources()) {
+      CHECK(resource.has_allocation_info());
+    }
 
     executors[slaveId][executorInfo.executor_id()] = executorInfo;
     totalUsedResources += executorInfo.resources();

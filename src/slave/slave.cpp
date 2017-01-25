@@ -101,6 +101,8 @@
 #include <slave/posix_signalhandler.hpp>
 #endif // __WINDOWS__
 
+using google::protobuf::RepeatedPtrField;
+
 using mesos::executor::Call;
 
 using mesos::master::detector::MasterDetector;
@@ -1866,6 +1868,7 @@ void Slave::_run(
   foreach (const TaskInfo& task, tasks) {
     Resources checkpointedTaskResources =
       Resources(task.resources()).filter(needCheckpointing);
+    checkpointedTaskResources.unallocate();
 
     foreach (const Resource& resource, checkpointedTaskResources) {
       if (!checkpointedResources.contains(resource)) {
@@ -5209,6 +5212,54 @@ Future<Nothing> Slave::recover(const Try<state::State>& state)
   Option<ResourcesState> resourcesState = state->resources;
   Option<SlaveState> slaveState = state->slave;
 
+  // With the addition of frameworks with multiple roles, we
+  // need to inject the allocated role into each allocated
+  // `Resource` object that we've persisted.
+  //
+  // TODO(bmahler): When can the `info` fields be None?
+  auto injectAllocationInfo = [](
+      RepeatedPtrField<Resource>* resources,
+      const FrameworkInfo& frameworkInfo)
+  {
+    set<string> roles = protobuf::framework::getRoles(frameworkInfo);
+
+    for (int i = 0; i < resources->size(); ++i) {
+      Resource* resource = resources->Mutable(i);
+
+      if (!resource->has_allocation_info()) {
+        if (roles.size() != 1) {
+          LOG(FATAL) << "Missing 'Resource.AllocationInfo' for resources"
+                     << " allocated to MULTI_ROLE framework"
+                     << " '" << frameworkInfo.name() << "'";
+        }
+
+        resource->mutable_allocation_info()->set_role(*roles.begin());
+      }
+    }
+  };
+
+  // TODO(bmahler): We currently don't allow frameworks to
+  // change their roles so we do not need to re-persist the
+  // resources with `AllocationInfo` injected for existing
+  // tasks and executors.
+  if (slaveState.isSome()) {
+    foreachvalue (FrameworkState& frameworkState, slaveState->frameworks) {
+      foreachvalue (ExecutorState& executorState, frameworkState.executors) {
+        injectAllocationInfo(
+            executorState.info->mutable_resources(),
+            frameworkState.info.get());
+
+        foreachvalue (RunState& runState, executorState.runs) {
+          foreachvalue (TaskState& taskState, runState.tasks) {
+            injectAllocationInfo(
+                taskState.info->mutable_resources(),
+                frameworkState.info.get());
+          }
+        }
+      }
+    }
+  }
+
   // Recover checkpointed resources.
   // NOTE: 'resourcesState' is None if the slave rootDir does not
   // exist or the resources checkpoint file cannot be found.
@@ -5616,6 +5667,12 @@ void Slave::_forwardOversubscribed(const Future<Resources>& oversubscribable)
     // rather than rejecting and crashing here.
     CHECK_EQ(oversubscribable.get(), oversubscribable->revocable());
 
+    auto unallocated = [](const Resources& resources) {
+      Resources result = resources;
+      result.unallocate();
+      return result;
+    };
+
     // Calculate the latest allocation of oversubscribed resources.
     // Note that this allocation value might be different from the
     // master's view because new task/executor might be in flight from
@@ -5625,7 +5682,7 @@ void Slave::_forwardOversubscribed(const Future<Resources>& oversubscribable)
     Resources oversubscribed;
     foreachvalue (Framework* framework, frameworks) {
       foreachvalue (Executor* executor, framework->executors) {
-        oversubscribed += executor->resources.revocable();
+        oversubscribed += unallocated(executor->resources.revocable());
       }
     }
 

@@ -3552,11 +3552,15 @@ void Master::accept(
     // TODO(jieyu): Add metrics for non launch operations.
   }
 
+  // TODO(bmahler): MULTI_ROLE: Validate that the accepted offers
+  // do not mix allocation roles.
+
   // TODO(bmahler): We currently only support using multiple offers
   // for a single slave.
   Resources offeredResources;
   Option<SlaveID> slaveId = None();
   Option<Error> error = None();
+  Option<Resource::AllocationInfo> allocationInfo = None();
 
   if (accept.offer_ids().size() == 0) {
     error = Error("No offers specified");
@@ -3579,6 +3583,7 @@ void Master::accept(
               None());
         } else {
           slaveId = offer->slave_id();
+          allocationInfo = offer->allocation_info();
           offeredResources += offer->resources();
         }
 
@@ -3652,6 +3657,19 @@ void Master::accept(
     }
 
     return;
+  }
+
+  CHECK_SOME(allocationInfo);
+
+  // With the addition of the MULTI_ROLE capability, the resources
+  // within an offer now contain an `AllocationInfo`. We therefore
+  // inject the offer's allocation info into the operation's
+  // resources if the scheduler has not done so already.
+  for (int i = 0; i < accept.operations_size(); ++i) {
+    accept.mutable_operations(i)->CopyFrom(
+        protobuf::adjustOfferOperation(
+            accept.operations(i),
+            allocationInfo.get()));
   }
 
   CHECK_SOME(slaveId);
@@ -5482,8 +5500,8 @@ void Master::_reregisterSlave(
     const SlaveInfo& slaveInfo,
     const UPID& pid,
     const vector<Resource>& checkpointedResources,
-    const vector<ExecutorInfo>& executorInfos,
-    const vector<Task>& tasks,
+    const vector<ExecutorInfo>& executorInfos_,
+    const vector<Task>& tasks_,
     const vector<FrameworkInfo>& frameworks,
     const vector<Archive::Framework>& completedFrameworks,
     const string& version,
@@ -5507,6 +5525,67 @@ void Master::_reregisterSlave(
   // Ensure we don't remove the slave for not re-registering after
   // we've recovered it from the registry.
   slaves.recovered.erase(slaveInfo.id());
+
+  // For agents without the MULTI_ROLE capability,
+  // we need to inject the allocation role inside
+  // the task and executor resources;
+  auto injectAllocationInfo = [](
+      RepeatedPtrField<Resource>* resources,
+      const FrameworkInfo& frameworkInfo)
+  {
+    set<string> roles = protobuf::framework::getRoles(frameworkInfo);
+
+    for (int i = 0; i < resources->size(); ++i) {
+      Resource* resource = resources->Mutable(i);
+
+      if (!resource->has_allocation_info()) {
+        if (roles.size() != 1) {
+          LOG(FATAL) << "Missing 'Resource.AllocationInfo' for resources"
+                     << " allocated to MULTI_ROLE framework"
+                     << " '" << frameworkInfo.name() << "'";
+        }
+
+        resource->mutable_allocation_info()->set_role(*roles.begin());
+      }
+    }
+  };
+
+  protobuf::slave::Capabilities slaveCapabilities(slaveInfo.capabilities());
+  bool adjusted = false;
+  vector<Task> adjustedTasks;
+  vector<ExecutorInfo> adjustedExecutorInfos;
+
+  if (!slaveCapabilities.multiRole) {
+    hashmap<FrameworkID, FrameworkInfo> frameworks_;
+    foreach (const FrameworkInfo& framework, frameworks) {
+      frameworks_[framework.id()] = framework;
+    }
+
+    adjustedTasks = tasks_;
+    adjustedExecutorInfos = executorInfos_;
+
+    for (size_t i = 0; i < adjustedTasks.size(); ++i) {
+      CHECK(frameworks_.contains(adjustedTasks[i].framework_id()));
+
+      injectAllocationInfo(
+          adjustedTasks[i].mutable_resources(),
+          frameworks_.at(adjustedTasks[i].framework_id()));
+    }
+
+    for (size_t i = 0; i < adjustedExecutorInfos.size(); ++i) {
+      CHECK(frameworks_.contains(adjustedExecutorInfos[i].framework_id()));
+
+      injectAllocationInfo(
+          adjustedExecutorInfos[i].mutable_resources(),
+          frameworks_.at(adjustedExecutorInfos[i].framework_id()));
+    }
+  }
+
+  const vector<Task>& tasks =
+    adjusted ? adjustedTasks : tasks_;
+
+  const vector<ExecutorInfo>& executorInfos =
+    adjusted ? adjustedExecutorInfos : executorInfos_;
 
   MachineID machineId;
   machineId.set_hostname(slaveInfo.hostname());
@@ -8582,6 +8661,12 @@ void Slave::addTask(Task* task)
 
   CHECK(!tasks[frameworkId].contains(taskId))
     << "Duplicate task " << taskId << " of framework " << frameworkId;
+
+  // Verify that Resource.AllocationInfo is set,
+  // this should be guaranteed by the master.
+  foreach (const Resource& resource, task->resources()) {
+    CHECK(resource.has_allocation_info());
+  }
 
   tasks[frameworkId][taskId] = task;
 

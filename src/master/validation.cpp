@@ -1651,17 +1651,39 @@ Option<Error> validate(
     const hashmap<FrameworkID, Resources>& usedResources,
     const hashmap<FrameworkID, hashmap<TaskID, TaskInfo>>& pendingTasks)
 {
-  Option<Error> error = resource::validate(destroy.volumes());
+  // TODO(bmahler): Add a `Resources::transformed(transformation)`
+  // that returns a Resources with a transformation function applied
+  // to each Resource object, equivalent to a functional "map"
+  // operation, which enables:
+  //
+  //   Resources unallocated = resources.transformed(unallocate);
+  //
+  //   Resources stripped = resources
+  //     .transformed(stripLabels)
+  //     .transformed(stripDiskInfo);
+  //
+  //   // Or:
+  //   Resources stripped = resources
+  //     .transformed(strip(LABELS | DISK_INFO));
+  auto unallocated = [](const Resources& resources) {
+    Resources result = resources;
+    result.unallocate();
+    return result;
+  };
+
+  Resources volumes = unallocated(destroy.volumes());
+
+  Option<Error> error = resource::validate(volumes);
   if (error.isSome()) {
     return Error("Invalid resources: " + error.get().message);
   }
 
-  error = resource::validatePersistentVolume(destroy.volumes());
+  error = resource::validatePersistentVolume(volumes);
   if (error.isSome()) {
     return Error("Not a persistent volume: " + error.get().message);
   }
 
-  if (!checkpointedResources.contains(destroy.volumes())) {
+  if (!checkpointedResources.contains(volumes)) {
     return Error("Persistent volumes not found");
   }
 
@@ -1670,8 +1692,8 @@ Option<Error> validate(
   // it is not possible for a non-shared resource to appear in an offer
   // if it is already in use.
   foreachvalue (const Resources& resources, usedResources) {
-    foreach (const Resource& volume, destroy.volumes()) {
-      if (resources.contains(volume)) {
+    foreach (const Resource& volume, volumes) {
+      if (unallocated(resources).contains(volume)) {
         return Error("Persistent volumes in use");
       }
     }
@@ -1689,6 +1711,8 @@ Option<Error> validate(
       if (task.has_executor()) {
         resources += task.executor().resources();
       }
+
+      resources = unallocated(resources);
 
       foreach (const Resource& volume, destroy.volumes()) {
         if (resources.contains(volume)) {

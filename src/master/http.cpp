@@ -4600,7 +4600,7 @@ Future<Response> Master::Http::_operation(
   }
 
   // The resources recovered by rescinding outstanding offers.
-  Resources recovered;
+  Resources totalRecovered;
 
   // We pessimistically assume that what seems like "available"
   // resources in the allocator will be gone. This can happen due to
@@ -4611,12 +4611,15 @@ Future<Response> Master::Http::_operation(
   foreach (Offer* offer, utils::copy(slave->offers)) {
     // If rescinding the offer would not contribute to satisfying
     // the required resources, skip it.
-    if (required == required - offer->resources()) {
+    Resources recovered = offer->resources();
+    recovered.unallocate();
+
+    if (required == required - recovered) {
       continue;
     }
 
-    recovered += offer->resources();
-    required -= offer->resources();
+    totalRecovered += recovered;
+    required -= recovered;
 
     // We explicitly pass 'Filters()' which has a default 'refuse_sec'
     // of 5 seconds rather than 'None()' here, so that we can
@@ -4630,7 +4633,7 @@ Future<Response> Master::Http::_operation(
     master->removeOffer(offer, true); // Rescind!
 
     // If we've rescinded enough offers to cover 'operation', we're done.
-    Try<Resources> updatedRecovered = recovered.apply(operation);
+    Try<Resources> updatedRecovered = totalRecovered.apply(operation);
     if (updatedRecovered.isSome()) {
       break;
     }
