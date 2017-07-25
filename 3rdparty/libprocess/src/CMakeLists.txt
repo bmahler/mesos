@@ -43,6 +43,8 @@ set(PROCESS_SRC
   gate.hpp
   help.cpp
   http.cpp
+  http_proxy.cpp
+  http_proxy.hpp
   io.cpp
   latch.cpp
   logging.cpp
@@ -58,6 +60,7 @@ set(PROCESS_SRC
   run_queue.hpp
   semaphore.hpp
   socket.cpp
+  socket_manager.hpp
   subprocess.cpp
   time.cpp
   timeseries.cpp
