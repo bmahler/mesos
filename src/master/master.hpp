@@ -1106,29 +1106,19 @@ private:
         const Option<process::http::authentication::Principal>&
             principal) const;
 
-  private:
-    // Heuristically tries to determine whether a quota request could
-    // reasonably be satisfied given the current cluster capacity. The
-    // goal is to determine whether a user may accidentally request an
-    // amount of resources that would prevent frameworks without quota
-    // from getting any offers. A force flag will allow users to bypass
-    // this check.
+    // Determines whether the cluster is overcommitted with quota,
+    // i.e. the following does not hold:
     //
-    // The heuristic tests whether the total quota, including the new
-    // request, does not exceed the sum of non-static cluster resources,
-    // i.e. the following inequality holds:
-    //   total - statically reserved >= total quota + quota request
+    //   total - statically reserved >= total quota
     //
-    // Please be advised that:
-    //   * It is up to an allocator how to satisfy quota (for example,
-    //     what resources to account towards quota, as well as which
-    //     resources to consider allocatable for quota).
-    //   * Even if there are enough resources at the moment of this check,
-    //     agents may terminate at any time, rendering the cluster under
-    //     quota.
-    Option<Error> capacityHeuristic(
-        const mesos::quota::QuotaInfo& request) const;
+    // Note that this doesn't say anything about whether we're
+    // able to satisfy the quota guarantees (e.g. due to
+    // fragmentation).
+    static Option<Error> overcommitted(
+        const std::vector<Resources>& activeAgents,
+        const hashmap<std::string, Quota>& quotas);
 
+  private:
     // We always want to rescind offers after the capacity heuristic. The
     // reason for this is the race between the allocator and the master:
     // it can happen that there are not enough free resources at the
@@ -1170,7 +1160,7 @@ private:
 
     process::Future<process::http::Response> __set(
         const mesos::quota::QuotaInfo& quotaInfo,
-        bool forced) const;
+        bool force) const;
 
     process::Future<process::http::Response> _remove(
         const std::string& role,

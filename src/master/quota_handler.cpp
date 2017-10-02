@@ -186,63 +186,35 @@ private:
 };
 
 
-Option<Error> Master::QuotaHandler::capacityHeuristic(
-    const QuotaInfo& request) const
+// Static.
+Option<Error> Master::QuotaHandler::overcommitted(
+    const vector<Resources>& activeAgents,
+    const hashmap<string, Quota>& quotas)
 {
-  VLOG(1) << "Performing capacity heuristic check for a set quota request";
-
-  // This should have been validated earlier.
-  CHECK(master->isWhitelistedRole(request.role()));
-  CHECK(!master->quotas.contains(request.role()));
-
-  hashmap<string, Quota> quotaMap = master->quotas;
-
-  // Check that adding the requested quota to the existing quotas does
-  // not violate the capacity heuristic.
-  quotaMap[request.role()] = Quota{request};
-
-  QuotaTree quotaTree(quotaMap);
+  QuotaTree quotaTree(quotas);
 
   CHECK_NONE(quotaTree.validate());
 
   Resources totalQuota = quotaTree.total();
 
-  // Determine whether the total quota, including the new request, does
-  // not exceed the sum of non-static cluster resources.
-  //
-  // NOTE: We do not necessarily calculate the full sum of non-static
-  // cluster resources. We apply the early termination logic as it can
-  // reduce the cost of the function significantly. This early exit does
-  // not influence the declared inequality check.
-  Resources nonStaticClusterResources;
-  foreachvalue (Slave* slave, master->slaves.registered) {
-    // We do not consider disconnected or inactive agents, because they
-    // do not participate in resource allocation.
-    if (!slave->connected || !slave->active) {
-      continue;
-    }
+  // Excludes static reservations and non-SCALAR resources.
+  Resources totalCluster;
 
-    // NOTE: Dynamic reservations are not excluded here because they do
-    // not show up in `SlaveInfo` resources. In contrast to static
-    // reservations, dynamic reservations may be unreserved at any time,
-    // hence making resources available for quota'ed frameworks.
-    Resources nonStaticAgentResources =
-      Resources(slave->info.resources()).unreserved();
-
-    nonStaticClusterResources += nonStaticAgentResources;
-
-    // If we have found enough resources to satisfy the inequality, then
-    // we can return early.
-    if (nonStaticClusterResources.contains(totalQuota)) {
-      return None();
-    }
+  foreach (const Resources& agent, activeAgents) {
+    // We assume that the provided resources are the static total
+    // for each agent. This means no dynamic reservations or other
+    // transformations are present. This is convenient, since we
+    // only want to deal with the static total here (so we just
+    // need to exclude static reservations).
+    totalCluster += agent.unreserved().scalars();
   }
 
-  // If we reached this point, there are not enough available resources
-  // in the cluster, hence the request does not pass the heuristic.
-  return Error(
-      "Not enough available cluster capacity to reasonably satisfy quota "
-      "request; the force flag can be used to override this check");
+  if (!totalCluster.contains(totalQuota)) {
+    return Error("Total quota '" + stringify(totalQuota) + "'"
+                 " vs total cluster '" + stringify(totalCluster) + "'");
+  }
+
+  return None();
 }
 
 
@@ -533,7 +505,7 @@ Future<http::Response> Master::QuotaHandler::_set(
   }
 
   // The force flag is used to overwrite the `capacityHeuristic` check.
-  const bool forced = quotaRequest.force();
+  const bool force = quotaRequest.force();
 
   if (principal.isSome()) {
     // We assume that `principal->value.isSome()` is true. The master's HTTP
@@ -546,35 +518,49 @@ Future<http::Response> Master::QuotaHandler::_set(
 
   return authorizeUpdateQuota(principal, quotaInfo)
     .then(defer(master->self(), [=](bool authorized) -> Future<http::Response> {
-      return !authorized ? Forbidden() : __set(quotaInfo, forced);
+      return !authorized ? Forbidden() : __set(quotaInfo, force);
     }));
 }
 
 
 Future<http::Response> Master::QuotaHandler::__set(
     const QuotaInfo& quotaInfo,
-    bool forced) const
+    bool force) const
 {
-  if (forced) {
-    VLOG(1) << "Using force flag to override quota capacity heuristic check";
-  } else {
-    // Validate whether a quota request can be satisfied.
-    Option<Error> error = capacityHeuristic(quotaInfo);
+  Quota quota = Quota{quotaInfo};
+
+  hashmap<string, Quota> updatedQuota = master->quotas;
+  updatedQuota[quotaInfo.role()] = quota;
+
+  if (!force) {
+    // Check for quota overcommit. We only include resources
+    // on agents that are connected with the master and actively
+    // offering resources.
+    vector<Resources> activeAgents;
+
+    foreachvalue (const Slave* agent, master->slaves.registered) {
+      if (agent->connected && agent->active) {
+        activeAgents.push_back(agent->info.resources());
+      }
+    }
+
+    Option<Error> error = overcommitted(activeAgents, updatedQuota);
+
     if (error.isSome()) {
       return Conflict(
-          "Heuristic capacity check for set quota request failed: " +
-          error.get().message);
+          "Request overcommits the cluster with quota: " + error->message + "\n"
+          "\n"
+          "Please provide the 'force' flag to override,"
+          " or revise the request.\n");
     }
   }
-
-  Quota quota = Quota{quotaInfo};
 
   // Populate master's quota-related local state. We do this before updating
   // the registry in order to make sure that we are not already trying to
   // satisfy a request for this role (since this is a multi-phase event).
   // NOTE: We do not need to remove quota for the role if the registry update
   // fails because in this case the master fails as well.
-  master->quotas[quotaInfo.role()] = quota;
+  master->quotas = updatedQuota;
 
   // Update the registry with the new quota and acknowledge the request.
   return master->registrar->apply(Owned<Operation>(

@@ -643,7 +643,7 @@ TEST_F(MasterQuotaTest, InsufficientResourcesSingleAgent)
   }
 
   // Force flag should override the `capacityHeuristic` check and make the
-  // previous request succeed.
+  // request succeed.
   {
     Future<Response> response = process::http::post(
         master.get()->pid,
@@ -1283,9 +1283,10 @@ TEST_F(MasterQuotaTest, InsufficientResourcesWithStaticReservation)
     AWAIT_EXPECT_RESPONSE_STATUS_EQ(Conflict().status, response);
 
     AWAIT_EXPECT_RESPONSE_BODY_EQ(
-        "Heuristic capacity check for set quota request failed: Not enough "
-        "available cluster capacity to reasonably satisfy quota request; the "
-        "force flag can be used to override this check",
+        "Request overcommits the cluster with quota: Total quota"
+        " 'cpus:3; mem:1536' vs total cluster 'mem:1536; disk:2048; cpus:2'\n"
+        "\n"
+        "Please provide the 'force' flag to override, or revise the request.\n",
         response)
       << response.get().body;
   }
@@ -1373,9 +1374,10 @@ TEST_F(MasterQuotaTest, MultipleExistingQuotas)
     AWAIT_EXPECT_RESPONSE_STATUS_EQ(Conflict().status, response);
 
     AWAIT_EXPECT_RESPONSE_BODY_EQ(
-        "Heuristic capacity check for set quota request failed: Not enough "
-        "available cluster capacity to reasonably satisfy quota request; the "
-        "force flag can be used to override this check",
+        "Request overcommits the cluster with quota: Total quota"
+        " 'cpus:3; mem:1536' vs total cluster 'cpus:2; mem:1024; disk:1024'\n"
+        "\n"
+        "Please provide the 'force' flag to override, or revise the request.\n",
         response)
       << response.get().body;
   }
@@ -1394,8 +1396,8 @@ TEST_F(MasterQuotaTest, MultipleExistingQuotas)
   }
 }
 
-// Checks that resources from a disconnected agent are not used to fulfil quota
-// requests.
+// Tests that capacity from disconnected agents is not included
+// in the capacity check.
 TEST_F(MasterQuotaTest, InsufficientResourceAfterSlaveDisconnect)
 {
   TestAllocator<> allocator;
@@ -1448,9 +1450,10 @@ TEST_F(MasterQuotaTest, InsufficientResourceAfterSlaveDisconnect)
     AWAIT_EXPECT_RESPONSE_STATUS_EQ(Conflict().status, response);
 
     AWAIT_EXPECT_RESPONSE_BODY_EQ(
-        "Heuristic capacity check for set quota request failed: Not enough "
-        "available cluster capacity to reasonably satisfy quota request; the "
-        "force flag can be used to override this check",
+        "Request overcommits the cluster with quota: Total quota"
+        " 'cpus:2; mem:1024' vs total cluster '{}'\n"
+        "\n"
+        "Please provide the 'force' flag to override, or revise the request.\n",
         response)
       << response.get().body;
   }
