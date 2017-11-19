@@ -85,12 +85,19 @@ message Call {
     STOP_MAINTENANCE = 27;            // See 'StopMaintenance' below.
 
     GET_QUOTA = 28;
-    SET_QUOTA = 29;          // See 'SetQuota' below.
-    REMOVE_QUOTA = 30;       // See 'RemoveQuota' below.
+    UPDATE_QUOTA = 33;       // See 'UpdateQuota' below.
 
     TEARDOWN = 31;       // See 'Teardown' below.
 
     MARK_AGENT_GONE = 32; // See 'MarkAgentGone' below.
+
+    // Deprecated calls:
+
+    // These are deprecated in favor of `UPDATE_QUOTA`,
+    // to "remove" quota, simply `UPDATE_QUOTA` to omit
+    // the defaults (no guarantee and no limit).
+    SET_QUOTA = 29;          // See 'SetQuota' below.
+    REMOVE_QUOTA = 30;       // See 'RemoveQuota' below.
   }
 
   // Provides a snapshot of the current metrics tracked by the master.
@@ -183,13 +190,8 @@ message Call {
     repeated MachineID machines = 1;
   }
 
-  // Sets the quota for resources to be used by a particular role.
-  message SetQuota {
-    required quota.QuotaRequest quota_request = 1;
-  }
-
-  message RemoveQuota {
-    required string role = 1;
+  message UpdateQuota {
+    repeated quota.QuotaRequest quota_requests = 1;
   }
 
   // Tears down a running framework by shutting down all tasks/executors and
@@ -213,6 +215,16 @@ message Call {
     required AgentID agent_id = 1;
   }
 
+  // DEPRECATED, see `SET_QUOTA`.
+  message SetQuota {
+    required quota.QuotaRequest quota_request = 1;
+  }
+
+  // DEPRECATED, see `REMOVE_QUOTA`.
+  message RemoveQuota {
+    required string role = 1;
+  }
+
   optional Type type = 1;
 
   optional GetMetrics get_metrics = 2;
@@ -227,10 +239,13 @@ message Call {
   optional UpdateMaintenanceSchedule update_maintenance_schedule = 11;
   optional StartMaintenance start_maintenance = 12;
   optional StopMaintenance stop_maintenance = 13;
-  optional SetQuota set_quota = 14;
-  optional RemoveQuota remove_quota = 15;
+  optional UpdateQuota update_quota = 18;
   optional Teardown teardown = 16;
   optional MarkAgentGone mark_agent_gone = 17;
+
+  // DEPRECATED, see `SET_QUOTA` and `REMOVE_QUOTA`.
+  optional SetQuota set_quota = 14;
+  optional RemoveQuota remove_quota = 15;
 }
 
 
