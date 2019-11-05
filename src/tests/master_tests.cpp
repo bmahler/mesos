@@ -11124,7 +11124,7 @@ TEST_F(MasterTest, LostTaskCleanup) {
   const RepeatedPtrField<mesos::v1::Task>& tasks =
     response_->get_tasks().tasks();
 
-  ASSERT_EQ(1, tasks.size()) << JSON::protobuf(tasks);
+  ASSERT_EQ(1, tasks.size()) << JSON::protobuf(*response_);
   EXPECT_EQ(v1::TASK_RUNNING, tasks[0].state()) << JSON::protobuf(tasks[0]);
 
   const RepeatedPtrField<mesos::v1::Task>& completedTasks =

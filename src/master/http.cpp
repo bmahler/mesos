@@ -25,6 +25,16 @@
 #include <utility>
 #include <vector>
 
+#include <google/protobuf/descriptor.h>
+#include <google/protobuf/wire_format_lite.h>
+
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
+
+#include <google/protobuf/util/json_util.h>
+#include <google/protobuf/util/type_resolver.h>
+#include <google/protobuf/util/type_resolver_util.h>
+
 #include <mesos/attributes.hpp>
 #include <mesos/type_utils.hpp>
 
@@ -90,6 +100,8 @@
 
 using google::protobuf::RepeatedPtrField;
 
+using google::protobuf::internal::WireFormatLite;
+
 using process::AUTHENTICATION;
 using process::AUTHORIZATION;
 using process::Clock;
@@ -120,12 +132,14 @@ using process::http::URL;
 using process::http::authentication::Principal;
 
 using std::copy_if;
+using std::function;
 using std::list;
 using std::map;
 using std::set;
 using std::string;
 using std::tie;
 using std::tuple;
+using std::unique_ptr;
 using std::vector;
 
 using mesos::authorization::createSubject;
@@ -1325,13 +1339,196 @@ Future<Response> Master::Http::getFrameworks(
     .then(defer(
         master->self(),
         [=](const Owned<ObjectApprovers>& approvers) -> Future<Response> {
-          mesos::master::Response response;
-          response.set_type(mesos::master::Response::GET_FRAMEWORKS);
-          *response.mutable_get_frameworks() = _getFrameworks(approvers);
+          // XXX Handle json.
 
-          return OK(
-              serialize(contentType, evolve(response)), stringify(contentType));
-        }));
+          // Serialize the following message:
+          //
+          //   mesos::master::Response response;
+          //   response.set_type(mesos::master::Response::GET_FRAMEWORKS);
+          //   *response.mutable_get_frameworks() = _getFrameworks(approvers);
+
+          switch (contentType) {
+            case ContentType::PROTOBUF: {
+              string output;
+              google::protobuf::io::StringOutputStream stream(&output);
+              google::protobuf::io::CodedOutputStream writer(&stream);
+
+              writer.WriteTag(
+                  WireFormatLite::MakeTag(
+                      mesos::v1::master::Response::kTypeFieldNumber,
+                      WireFormatLite::WIRETYPE_VARINT));
+              writer.WriteVarint32SignExtended(
+                  mesos::v1::master::Response::GET_FRAMEWORKS);
+
+              string serializedGetFrameworks =
+                serializeGetFrameworks(approvers);
+              writer.WriteTag(
+                  WireFormatLite::MakeTag(
+                      mesos::v1::master::Response::kGetFrameworksFieldNumber,
+                      WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+              writer.WriteVarint32(serializedGetFrameworks.size());
+              writer.WriteString(serializedGetFrameworks);
+
+              // We must manually trim the unused buffer space since
+              // we use the string before the coded output stream is
+              // destructed.
+              writer.Trim();
+
+              return OK(std::move(output), stringify(contentType));
+            }
+
+            case ContentType::JSON: {
+              string body = jsonify([&](JSON::ObjectWriter* writer) {
+                const google::protobuf::Descriptor* descriptor =
+                  v1::master::Response::descriptor();
+
+                int field;
+
+                field = v1::master::Response::kTypeFieldNumber;
+                writer->field(
+                    descriptor->FindFieldByNumber(field)->name(),
+                    v1::master::Response::Type_Name(
+                        v1::master::Response::GET_FRAMEWORKS));
+
+                field = v1::master::Response::kGetFrameworksFieldNumber;
+                writer->field(
+                    descriptor->FindFieldByNumber(field)->name(),
+                    jsonifyGetFrameworks(master, approvers));
+              });
+
+              // TODO(bmahler): Pass jsonp query parameter through here.
+              return OK(std::move(body), stringify(contentType));
+            }
+
+            case ContentType::RECORDIO:
+              return BadRequest("Request must accept json or protobuf");
+          }
+      }));
+}
+
+
+function<void(JSON::ObjectWriter*)> Master::Http::jsonifyGetFrameworks(
+    const Master* master,
+    const Owned<ObjectApprovers>& approvers)
+{
+  // Serialize the following:
+  //
+  //   mesos::master::Response::GetFrameworks getFrameworks;
+  //   for each framework:
+  //     *getFrameworks.add_frameworks() = model(*framework);
+  //   for each completed framework:
+  //     *getFrameworks.add_completed_frameworks() = model(*framework);
+
+  // TODO(bmahler): Consider not constructing the temporary framework
+  // objects and instead serialize directly, but since we don't
+  // expect a large number of pending tasks, we currently don't
+  // bother with the more efficient approach.
+
+  // TODO(bmahler): This copies the Owned object approvers.
+  return [=](JSON::ObjectWriter* writer) {
+    const google::protobuf::Descriptor* descriptor =
+      v1::master::Response::GetFrameworks::descriptor();
+
+    int field;
+
+    field = v1::master::Response::GetFrameworks::kFrameworksFieldNumber;
+    writer->field(
+        descriptor->FindFieldByNumber(field)->name(),
+        [&](JSON::ArrayWriter* writer) {
+      foreachvalue (const Framework* framework,
+                    master->frameworks.registered) {
+        // Skip unauthorized frameworks.
+        if (!approvers->approved<VIEW_FRAMEWORK>(framework->info)) {
+          continue;
+        }
+
+        mesos::master::Response::GetFrameworks::Framework f = model(*framework);
+        writer->element(asV1Protobuf(f));
+      }
+    });
+
+    field =
+      v1::master::Response::GetFrameworks::kCompletedFrameworksFieldNumber;
+    writer->field(
+        descriptor->FindFieldByNumber(field)->name(),
+        [&](JSON::ArrayWriter* writer) {
+      foreachvalue (const Owned<Framework>& framework,
+                    master->frameworks.completed) {
+        // Skip unauthorized frameworks.
+        if (!approvers->approved<VIEW_FRAMEWORK>(framework->info)) {
+          continue;
+        }
+
+        mesos::master::Response::GetFrameworks::Framework f = model(*framework);
+        writer->element(asV1Protobuf(f));
+      }
+    });
+  };
+}
+
+
+string Master::Http::serializeGetFrameworks(
+    const Owned<ObjectApprovers>& approvers) const
+{
+  // Serialize the following:
+  //
+  //   mesos::master::Response::GetFrameworks getFrameworks;
+  //   for each framework:
+  //     *getFrameworks.add_frameworks() = model(*framework);
+  //   for each completed framework:
+  //     *getFrameworks.add_completed_frameworks() = model(*framework);
+
+  string output;
+  google::protobuf::io::StringOutputStream stream(&output);
+  google::protobuf::io::CodedOutputStream writer(&stream);
+
+  // TODO(bmahler): Consider not constructing the temporary framework
+  // objects and instead serialize directly, but since we don't
+  // expect a large number of pending tasks, we currently don't
+  // bother with the more efficient approach.
+
+  foreachvalue (const Framework* framework,
+                master->frameworks.registered) {
+    // Skip unauthorized frameworks.
+    if (!approvers->approved<VIEW_FRAMEWORK>(framework->info)) {
+      continue;
+    }
+
+    mesos::master::Response::GetFrameworks::Framework f = model(*framework);
+    writer.WriteTag(
+        WireFormatLite::MakeTag(
+            mesos::master::Response::GetFrameworks
+              ::kFrameworksFieldNumber,
+            WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+    writer.WriteVarint32(f.ByteSizeLong());
+    f.SerializeToCodedStream(&writer);
+  }
+
+  foreachvalue (const Owned<Framework>& framework,
+                master->frameworks.completed) {
+    // Skip unauthorized frameworks.
+    if (!approvers->approved<VIEW_FRAMEWORK>(framework->info)) {
+      continue;
+    }
+
+    mesos::master::Response::GetFrameworks::Framework f = model(*framework);
+    writer.WriteTag(
+        WireFormatLite::MakeTag(
+            mesos::master::Response::GetFrameworks
+              ::kCompletedFrameworksFieldNumber,
+            WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+    writer.WriteVarint32(f.ByteSizeLong());
+    f.SerializeToCodedStream(&writer);
+  }
+
+  // While an explicit Trim() isn't necessary (since the coded
+  // output stream is destructed before the string is returned),
+  // it's a quite tricky bug to diagnose if Trim() is missed, so
+  // we always do it explicitly to signal the reader about this
+  // subtlety.
+  writer.Trim();
+
+  return output;
 }
 
 
@@ -1377,14 +1574,256 @@ Future<Response> Master::Http::getExecutors(
     .then(defer(
         master->self(),
         [=](const Owned<ObjectApprovers>& approvers) -> Response {
-          mesos::master::Response response;
-          response.set_type(mesos::master::Response::GET_EXECUTORS);
+          // XXX Handle json.
 
-          *response.mutable_get_executors() = _getExecutors(approvers);
+          // Serialize the following message:
+          //
+          //   mesos::master::Response response;
+          //   response.set_type(mesos::master::Response::GET_EXECUTORS);
+          //   *response.mutable_get_executors() = _getExecutors(approvers);
 
-          return OK(
-              serialize(contentType, evolve(response)), stringify(contentType));
-        }));
+          switch (contentType) {
+            case ContentType::PROTOBUF: {
+              string output;
+              google::protobuf::io::StringOutputStream stream(&output);
+              google::protobuf::io::CodedOutputStream writer(&stream);
+
+              writer.WriteTag(
+                  WireFormatLite::MakeTag(
+                      mesos::v1::master::Response::kTypeFieldNumber,
+                      WireFormatLite::WIRETYPE_VARINT));
+              writer.WriteVarint32SignExtended(
+                  mesos::v1::master::Response::GET_EXECUTORS);
+
+              string serializedGetExecutors = serializeGetExecutors(approvers);
+              writer.WriteTag(
+                  WireFormatLite::MakeTag(
+                      mesos::v1::master::Response::kGetExecutorsFieldNumber,
+                      WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+              writer.WriteVarint32(serializedGetExecutors.size());
+              writer.WriteString(serializedGetExecutors);
+
+              // We must manually trim the unused buffer space since
+              // we use the string before the coded output stream is
+              // destructed.
+              writer.Trim();
+
+              return OK(std::move(output), stringify(contentType));
+            }
+
+            case ContentType::JSON: {
+              string body = jsonify([&](JSON::ObjectWriter* writer) {
+                const google::protobuf::Descriptor* descriptor =
+                  v1::master::Response::descriptor();
+
+                int field;
+
+                field = v1::master::Response::kTypeFieldNumber;
+                writer->field(
+                    descriptor->FindFieldByNumber(field)->name(),
+                    v1::master::Response::Type_Name(
+                        v1::master::Response::GET_EXECUTORS));
+
+                field = v1::master::Response::kGetExecutorsFieldNumber;
+                writer->field(
+                    descriptor->FindFieldByNumber(field)->name(),
+                    jsonifyGetExecutors(master, approvers));
+              });
+
+              // TODO(bmahler): Pass jsonp query parameter through here.
+              return OK(std::move(body), stringify(contentType));
+            }
+
+            case ContentType::RECORDIO:
+              return BadRequest("Request must accept json or protobuf");
+          }
+      }));
+}
+
+
+function<void(JSON::ObjectWriter*)> Master::Http::jsonifyGetExecutors(
+    const Master* master,
+    const Owned<ObjectApprovers>& approvers)
+{
+  // Serialize the following:
+  //
+  //   mesos::master::Response::GetExecutors getExecutors;
+  //
+  //   for each (executor, agent):
+  //     mesos::master::Response::GetExecutors::Executor* executor =
+  //       getExecutors.add_executors();
+  //     *executor->mutable_executor_info() = executorInfo;
+  //     *executor->mutable_slave_id() = slaveId;
+
+  // TODO(bmahler): This copies the owned object approvers.
+  return [=](JSON::ObjectWriter* writer) {
+    // Construct framework list with both active and completed frameworks.
+    vector<const Framework*> frameworks;
+    foreachvalue (Framework* framework, master->frameworks.registered) {
+      // Skip unauthorized frameworks.
+      if (approvers->approved<VIEW_FRAMEWORK>(framework->info)) {
+        frameworks.push_back(framework);
+      }
+    }
+    foreachvalue (const Owned<Framework>& framework,
+                  master->frameworks.completed) {
+      // Skip unauthorized frameworks.
+      if (approvers->approved<VIEW_FRAMEWORK>(framework->info)) {
+        frameworks.push_back(framework.get());
+      }
+    }
+
+    const google::protobuf::Descriptor* descriptor =
+      v1::master::Response::GetExecutors::descriptor();
+
+    int field;
+
+    field = v1::master::Response::GetExecutors::kExecutorsFieldNumber;
+    writer->field(
+        descriptor->FindFieldByNumber(field)->name(),
+        [&](JSON::ArrayWriter* writer) {
+      foreach (const Framework* framework, frameworks) {
+        foreachpair (const SlaveID& slaveId,
+                     const auto& executorsMap,
+                     framework->executors) {
+          foreachvalue (const ExecutorInfo& executorInfo, executorsMap) {
+            // Skip unauthorized executors.
+            if (!approvers->approved<VIEW_EXECUTOR>(
+                    executorInfo, framework->info)) {
+              continue;
+            }
+
+            writer->element([&](JSON::ObjectWriter* writer) {
+              const google::protobuf::Descriptor* descriptor =
+                v1::master::Response::GetExecutors::Executor::descriptor();
+
+              // Serialize the following message:
+              //
+              //   mesos::master::Response::GetExecutors::Executor executor;
+              //   *executor.mutable_executor_info() = executorInfo;
+              //   *executor.mutable_slave_id() = slaveId;
+              int field;
+
+              field = v1::master::Response::GetExecutors::Executor
+                ::kExecutorInfoFieldNumber;
+              writer->field(
+                  descriptor->FindFieldByNumber(field)->name(),
+                  asV1Protobuf(executorInfo));
+
+              field = v1::master::Response::GetExecutors::Executor
+                ::kAgentIdFieldNumber;
+              writer->field(
+                  descriptor->FindFieldByNumber(field)->name(),
+                  asV1Protobuf(slaveId));
+            });
+          }
+        }
+      }
+    });
+  };
+}
+
+
+string Master::Http::serializeGetExecutors(
+    const Owned<ObjectApprovers>& approvers) const
+{
+  // Construct framework list with both active and completed frameworks.
+  vector<const Framework*> frameworks;
+  foreachvalue (Framework* framework, master->frameworks.registered) {
+    // Skip unauthorized frameworks.
+    if (approvers->approved<VIEW_FRAMEWORK>(framework->info)) {
+      frameworks.push_back(framework);
+    }
+  }
+  foreachvalue (const Owned<Framework>& framework,
+                master->frameworks.completed) {
+    // Skip unauthorized frameworks.
+    if (approvers->approved<VIEW_FRAMEWORK>(framework->info)) {
+      frameworks.push_back(framework.get());
+    }
+  }
+
+  // Lambda for serializing the following message:
+  //
+  //   mesos::master::Response::GetExecutors::Executor executor;
+  //   *executor.mutable_executor_info() = executorInfo;
+  //   *executor.mutable_slave_id() = slaveId;
+  auto serializeExecutor = [](const ExecutorInfo& e, const SlaveID& s) {
+    string output;
+    google::protobuf::io::StringOutputStream stream(&output);
+    google::protobuf::io::CodedOutputStream writer(&stream);
+
+    writer.WriteTag(
+        WireFormatLite::MakeTag(
+            mesos::v1::master::Response::GetExecutors::Executor
+              ::kExecutorInfoFieldNumber,
+            WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+    writer.WriteVarint32(e.ByteSizeLong());
+    e.SerializeToCodedStream(&writer);
+
+    writer.WriteTag(
+        WireFormatLite::MakeTag(
+            mesos::v1::master::Response::GetExecutors::Executor
+              ::kAgentIdFieldNumber,
+            WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+    writer.WriteVarint32(s.ByteSizeLong());
+    s.SerializeToCodedStream(&writer);
+
+    // While an explicit Trim() isn't necessary (since the coded
+    // output stream is destructed before the string is returned),
+    // it's a quite tricky bug to diagnose if Trim() is missed, so
+    // we always do it explicitly to signal the reader about this
+    // subtlety.
+    writer.Trim();
+
+    return output;
+  };
+
+  string output;
+  google::protobuf::io::StringOutputStream stream(&output);
+  google::protobuf::io::CodedOutputStream writer(&stream);
+
+  // Serialize the following:
+  //
+  //   mesos::master::Response::GetExecutors getExecutors;
+  //
+  //   for each (executor, agent):
+  //     mesos::master::Response::GetExecutors::Executor* executor =
+  //       getExecutors.add_executors();
+  //     *executor->mutable_executor_info() = executorInfo;
+  //     *executor->mutable_slave_id() = slaveId;
+
+  foreach (const Framework* framework, frameworks) {
+    foreachpair (const SlaveID& slaveId,
+                 const auto& executorsMap,
+                 framework->executors) {
+      foreachvalue (const ExecutorInfo& executorInfo, executorsMap) {
+        // Skip unauthorized executors.
+        if (!approvers->approved<VIEW_EXECUTOR>(
+                executorInfo, framework->info)) {
+          continue;
+        }
+
+        string serializedExecutor = serializeExecutor(executorInfo, slaveId);
+        writer.WriteTag(
+            WireFormatLite::MakeTag(
+                mesos::v1::master::Response::GetExecutors
+                  ::kExecutorsFieldNumber,
+                WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+        writer.WriteVarint32(serializedExecutor.size());
+        writer.WriteString(serializedExecutor);
+      }
+    }
+  }
+
+  // While an explicit Trim() isn't necessary (since the coded
+  // output stream is destructed before the string is returned),
+  // it's a quite tricky bug to diagnose if Trim() is missed, so
+  // we always do it explicitly to signal the reader about this
+  // subtlety.
+  writer.Trim();
+
+  return output;
 }
 
 
@@ -1452,14 +1891,224 @@ Future<Response> Master::Http::getState(
     .then(defer(
         master->self(),
         [=](const Owned<ObjectApprovers>& approvers) -> Response {
-          mesos::master::Response response;
-          response.set_type(mesos::master::Response::GET_STATE);
+          // Serialize the following message:
+          //
+          //   mesos::master::Response response;
+          //   response.set_type(mesos::master::Response::GET_STATE);
+          //   *response.mutable_get_state() = _getState(approvers);
 
-          *response.mutable_get_state() = _getState(approvers);
+          switch (contentType) {
+            case ContentType::PROTOBUF: {
+              string output;
+              google::protobuf::io::StringOutputStream stream(&output);
+              google::protobuf::io::CodedOutputStream writer(&stream);
 
-          return OK(
-              serialize(contentType, evolve(response)), stringify(contentType));
+              writer.WriteTag(
+                  WireFormatLite::MakeTag(
+                      mesos::v1::master::Response::kTypeFieldNumber,
+                      WireFormatLite::WIRETYPE_VARINT));
+              writer.WriteVarint32SignExtended(
+                  mesos::v1::master::Response::GET_STATE);
+
+              string serializedGetState = serializeGetState(approvers);
+              writer.WriteTag(
+                  WireFormatLite::MakeTag(
+                      mesos::v1::master::Response::kGetStateFieldNumber,
+                      WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+              writer.WriteVarint32(serializedGetState.size());
+              writer.WriteString(serializedGetState);
+
+              // We must manually trim the unused buffer space since
+              // we use the string before the coded output stream is
+              // destructed.
+              writer.Trim();
+
+              return OK(std::move(output), stringify(contentType));
+            }
+
+            case ContentType::JSON: {
+              string body = jsonify([&](JSON::ObjectWriter* writer) {
+                const google::protobuf::Descriptor* descriptor =
+                  v1::master::Response::descriptor();
+
+                int field;
+
+                field = v1::master::Response::kTypeFieldNumber;
+                writer->field(
+                    descriptor->FindFieldByNumber(field)->name(),
+                    v1::master::Response::Type_Name(
+                        v1::master::Response::GET_STATE));
+
+                field = v1::master::Response::kGetStateFieldNumber;
+                writer->field(
+                    descriptor->FindFieldByNumber(field)->name(),
+                    jsonifyGetState(master, approvers));
+              });
+
+              // TODO(bmahler): Pass jsonp query parameter through here.
+              return OK(std::move(body), stringify(contentType));
+            }
+
+            case ContentType::RECORDIO:
+              return BadRequest("Request must accept json or protobuf");
+          }
+
+//          ///////////////////////////////
+//          // Temp for testing:
+//          mesos::master::Response expected;
+//          expected.set_type(mesos::master::Response::GET_STATE);
+//          *expected.mutable_get_state() = _getState(approvers);
+//          std::cerr << "expected\n";
+//          foreach (char c, expected.SerializeAsString()) {
+//            fprintf(stderr, "%02X%s", (int)c, " ");
+//          }
+//          std::cerr << std::dec << std::endl;
+//          std::cerr << "actual\n";
+//          foreach (char c, output) {
+//            fprintf(stderr, "%02X%s", (int)c, " ");
+//          }
+//          std::cerr << std::dec << std::endl;
+//          ///////////////////////////////
+//
+//          if (contentType == ContentType::JSON) {
+//            unique_ptr<google::protobuf::util::TypeResolver> type_resolver(
+//              google::protobuf::util::NewTypeResolverForDescriptorPool(
+//                  "type.googleapis.com",
+//                  google::protobuf::DescriptorPool::generated_pool()));
+//
+//            string json;
+//
+//            // TODO(bmahler): Make this a constant for mesos APIs.
+//            google::protobuf::util::JsonPrintOptions options;
+//            options.preserve_proto_field_names = true;
+//            options.always_print_primitive_fields = true;
+//
+//            google::protobuf::util::Status status =
+//              google::protobuf::util::BinaryToJsonString(
+//                  type_resolver.get(),
+//                  "type.googleapis.com/" +
+//                    mesos::v1::master::Response::descriptor()->full_name(),
+//                  output,
+//                  &json,
+//                  options);
+//
+//            if (!status.ok()) {
+//              return InternalServerError("Failed to convert protobuf to json: "
+//                                         + status.ToString());
+//
+//            }
+//
+//            output = std::move(json);
+//
+//            ///////////////////////////////
+//            // Temp for testing:
+////            std::cerr << "expected json\n"
+////                      << string(jsonify(JSON::Protobuf(expected)))
+////                      << "\nactual json\n"
+////                      << output << std::endl;
+//            ///////////////////////////////
+//          }
         }));
+}
+
+
+function<void(JSON::ObjectWriter*)> Master::Http::jsonifyGetState(
+    const Master* master,
+    const Owned<ObjectApprovers>& approvers)
+{
+  // Jsonify the following message:
+  //
+  //   mesos::master::Response::GetState getState;
+  //   *getState.mutable_get_tasks() = _getTasks(approvers);
+  //   *getState.mutable_get_executors() = _getExecutors(approvers);
+  //   *getState.mutable_get_frameworks() = _getFrameworks(approvers);
+  //   *getState.mutable_get_agents() = _getAgents(approvers);
+
+  // TODO(bmahler): This copies the Owned object approvers.
+  return [=](JSON::ObjectWriter* writer) {
+    const google::protobuf::Descriptor* descriptor =
+      v1::master::Response::GetState::descriptor();
+
+    int field;
+
+    field = v1::master::Response::GetState::kGetTasksFieldNumber;
+    writer->field(
+        descriptor->FindFieldByNumber(field)->name(),
+        jsonifyGetTasks(master, approvers));
+
+    field = v1::master::Response::GetState::kGetExecutorsFieldNumber;
+    writer->field(
+        descriptor->FindFieldByNumber(field)->name(),
+        jsonifyGetExecutors(master, approvers));
+
+    field = v1::master::Response::GetState::kGetFrameworksFieldNumber;
+    writer->field(
+        descriptor->FindFieldByNumber(field)->name(),
+        jsonifyGetFrameworks(master, approvers));
+
+    field = v1::master::Response::GetState::kGetAgentsFieldNumber;
+    writer->field(
+        descriptor->FindFieldByNumber(field)->name(),
+        jsonifyGetAgents(master, approvers));
+  };
+}
+
+
+string Master::Http::serializeGetState(
+    const Owned<ObjectApprovers>& approvers) const
+{
+  // Serialize the following message:
+  //
+  //   mesos::master::Response::GetState getState;
+  //   *getState.mutable_get_tasks() = _getTasks(approvers);
+  //   *getState.mutable_get_executors() = _getExecutors(approvers);
+  //   *getState.mutable_get_frameworks() = _getFrameworks(approvers);
+  //   *getState.mutable_get_agents() = _getAgents(approvers);
+
+  string output;
+  google::protobuf::io::StringOutputStream stream(&output);
+  google::protobuf::io::CodedOutputStream writer(&stream);
+
+  string serializedGetTasks = serializeGetTasks(approvers);
+  writer.WriteTag(
+      WireFormatLite::MakeTag(
+          mesos::v1::master::Response::GetState::kGetTasksFieldNumber,
+          WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+  writer.WriteVarint32(serializedGetTasks.size());
+  writer.WriteString(serializedGetTasks);
+
+  string serializedGetExecutors = serializeGetExecutors(approvers);
+  writer.WriteTag(
+      WireFormatLite::MakeTag(
+          mesos::v1::master::Response::GetState::kGetExecutorsFieldNumber,
+          WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+  writer.WriteVarint32(serializedGetExecutors.size());
+  writer.WriteString(serializedGetExecutors);
+
+  string serializedGetFrameworks = serializeGetFrameworks(approvers);
+  writer.WriteTag(
+      WireFormatLite::MakeTag(
+          mesos::v1::master::Response::GetState::kGetFrameworksFieldNumber,
+          WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+  writer.WriteVarint32(serializedGetFrameworks.size());
+  writer.WriteString(serializedGetFrameworks);
+
+  string serializedGetAgents = serializeGetAgents(approvers);
+  writer.WriteTag(
+      WireFormatLite::MakeTag(
+          mesos::v1::master::Response::GetState::kGetAgentsFieldNumber,
+          WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+  writer.WriteVarint32(serializedGetAgents.size());
+  writer.WriteString(serializedGetAgents);
+
+  // While an explicit Trim() isn't necessary (since the coded
+  // output stream is destructed before the string is returned),
+  // it's a quite tricky bug to diagnose if Trim() is missed, so
+  // we always do it explicitly to signal the reader about this
+  // subtlety.
+  writer.Trim();
+
+  return output;
 }
 
 
@@ -1674,6 +2323,117 @@ Future<Response> Master::Http::getVersion(
 }
 
 
+function<void(JSON::ObjectWriter*)> jsonifyGetMetrics(
+    const map<string, double>& metrics)
+{
+  // Serialize the following message:
+  //
+  //   mesos::master::Response::GetMetrics getMetrics;
+  //
+  //   foreachpair (const string& key, double value, metrics) {
+  //     Metric* metric = _getMetrics->add_metrics();
+  //     metric->set_name(key);
+  //     metric->set_value(value);
+  //   }
+
+  // NOTE: We capture metrics by reference here to avoid the expensive
+  // copy of the huge map. This is rather unsafe, since the map could
+  // get destructed in the caller before this lambda is invoked! However,
+  // if used in typical fashion with `jsonify`, this won't happen.
+  return [&](JSON::ObjectWriter* writer) {
+    const google::protobuf::Descriptor* descriptor =
+      v1::master::Response::GetMetrics::descriptor();
+
+    int field;
+
+    field = v1::master::Response::GetMetrics::kMetricsFieldNumber;
+    writer->field(
+        descriptor->FindFieldByNumber(field)->name(),
+        [&](JSON::ArrayWriter* writer) {
+          foreachpair (const string& key, double value, metrics) {
+            writer->element([&](JSON::ObjectWriter* writer) {
+              const google::protobuf::Descriptor* descriptor =
+                v1::Metric::descriptor();
+
+              int field;
+
+              field = v1::Metric::kNameFieldNumber;
+              writer->field(
+                  descriptor->FindFieldByNumber(field)->name(), key);
+
+              field = v1::Metric::kValueFieldNumber;
+              writer->field(
+                  descriptor->FindFieldByNumber(field)->name(), value);
+            });
+          }
+        });
+  };
+}
+
+
+string serializeGetMetrics(const map<string, double>& metrics)
+{
+  // Serialize the following message:
+  //
+  //   mesos::master::Response::GetMetrics getMetrics;
+  //
+  //   foreachpair (const string& key, double value, metrics) {
+  //     Metric* metric = _getMetrics->add_metrics();
+  //     metric->set_name(key);
+  //     metric->set_value(value);
+  //   }
+
+  auto serializeMetric = [](const string& key, double value) {
+    string output;
+    google::protobuf::io::StringOutputStream stream(&output);
+    google::protobuf::io::CodedOutputStream writer(&stream);
+
+    writer.WriteTag(
+        WireFormatLite::MakeTag(
+            mesos::v1::Metric::kNameFieldNumber,
+            WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+    writer.WriteVarint32(key.size());
+    writer.WriteString(key);
+
+    writer.WriteTag(
+        WireFormatLite::MakeTag(
+            mesos::v1::Metric::kValueFieldNumber,
+            WireFormatLite::WIRETYPE_FIXED64));
+    writer.WriteLittleEndian64(WireFormatLite::EncodeDouble(value));
+
+    // While an explicit Trim() isn't necessary (since the coded
+    // output stream is destructed before the string is returned),
+    // it's a quite tricky bug to diagnose if Trim() is missed, so
+    // we always do it explicitly to signal the reader about this
+    // subtlety.
+    writer.Trim();
+    return output;
+  };
+
+  string output;
+  google::protobuf::io::StringOutputStream stream(&output);
+  google::protobuf::io::CodedOutputStream writer(&stream);
+
+  foreachpair (const string& key, double value, metrics) {
+    string serializedMetric = serializeMetric(key, value);
+    writer.WriteTag(
+        WireFormatLite::MakeTag(
+            mesos::v1::master::Response::GetMetrics::kMetricsFieldNumber,
+            WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+    writer.WriteVarint32(serializedMetric.size());
+    writer.WriteString(serializedMetric);
+  }
+
+  // While an explicit Trim() isn't necessary (since the coded
+  // output stream is destructed before the string is returned),
+  // it's a quite tricky bug to diagnose if Trim() is missed, so
+  // we always do it explicitly to signal the reader about this
+  // subtlety.
+  writer.Trim();
+  return output;
+}
+
+
 Future<Response> Master::Http::getMetrics(
     const mesos::master::Call& call,
     const Option<Principal>& principal,
@@ -1689,19 +2449,69 @@ Future<Response> Master::Http::getMetrics(
 
   return process::metrics::snapshot(timeout)
     .then([contentType](const map<string, double>& metrics) -> Response {
-      mesos::master::Response response;
-      response.set_type(mesos::master::Response::GET_METRICS);
-      mesos::master::Response::GetMetrics* _getMetrics =
-        response.mutable_get_metrics();
+      // XXX Handle json.
 
-      foreachpair (const string& key, double value, metrics) {
-        Metric* metric = _getMetrics->add_metrics();
-        metric->set_name(key);
-        metric->set_value(value);
+      // Serialize the following message:
+      //
+      //   mesos::master::Response response;
+      //   response.set_type(mesos::master::Response::GET_METRICS);
+      //   mesos::master::Response::GetMetrics* getMetrics = ...;
+
+      switch (contentType) {
+        case ContentType::PROTOBUF: {
+          string output;
+          google::protobuf::io::StringOutputStream stream(&output);
+          google::protobuf::io::CodedOutputStream writer(&stream);
+
+          writer.WriteTag(
+              WireFormatLite::MakeTag(
+                  mesos::v1::master::Response::kTypeFieldNumber,
+                  WireFormatLite::WIRETYPE_VARINT));
+          writer.WriteVarint32SignExtended(
+              mesos::v1::master::Response::GET_METRICS);
+
+          string serializedGetMetrics = serializeGetMetrics(metrics);
+          writer.WriteTag(
+              WireFormatLite::MakeTag(
+                  mesos::v1::master::Response::kGetMetricsFieldNumber,
+                  WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+          writer.WriteVarint32(serializedGetMetrics.size());
+          writer.WriteString(serializedGetMetrics);
+
+          // We must manually trim the unused buffer space since
+          // we use the string before the coded output stream is
+          // destructed.
+          writer.Trim();
+
+          return OK(std::move(output), stringify(contentType));
+        }
+
+        case ContentType::JSON: {
+          string body = jsonify([&](JSON::ObjectWriter* writer) {
+            const google::protobuf::Descriptor* descriptor =
+              v1::master::Response::descriptor();
+
+            int field;
+
+            field = v1::master::Response::kTypeFieldNumber;
+            writer->field(
+                descriptor->FindFieldByNumber(field)->name(),
+                v1::master::Response::Type_Name(
+                    v1::master::Response::GET_METRICS));
+
+            field = v1::master::Response::kGetMetricsFieldNumber;
+            writer->field(
+                descriptor->FindFieldByNumber(field)->name(),
+                jsonifyGetMetrics(metrics));
+          });
+
+          // TODO(bmahler): Pass jsonp query parameter through here.
+          return OK(std::move(body), stringify(contentType));
+        }
+
+        case ContentType::RECORDIO:
+          return BadRequest("Request must accept json or protobuf");
       }
-
-      return OK(serialize(contentType, evolve(response)),
-                stringify(contentType));
     });
 }
 
@@ -2070,13 +2880,208 @@ Future<Response> Master::Http::getAgents(
     .then(defer(
         master->self(),
         [=](const Owned<ObjectApprovers>& approvers) -> Response {
-          mesos::master::Response response;
-          response.set_type(mesos::master::Response::GET_AGENTS);
-          *response.mutable_get_agents() = _getAgents(approvers);
+          // Serialize the following message:
+          //
+          //   mesos::master::Response response;
+          //   response.set_type(mesos::master::Response::GET_AGENTS);
+          //   *response.mutable_get_agents() = _getAgents(approvers);
 
-          return OK(
-              serialize(contentType, evolve(response)), stringify(contentType));
+          switch (contentType) {
+            case ContentType::PROTOBUF: {
+              string output;
+              google::protobuf::io::StringOutputStream stream(&output);
+              google::protobuf::io::CodedOutputStream writer(&stream);
+
+              writer.WriteTag(
+                  WireFormatLite::MakeTag(
+                      mesos::v1::master::Response::kTypeFieldNumber,
+                      WireFormatLite::WIRETYPE_VARINT));
+              writer.WriteVarint32SignExtended(
+                  mesos::v1::master::Response::GET_AGENTS);
+
+              string serializedGetAgents = serializeGetAgents(approvers);
+              writer.WriteTag(
+                  WireFormatLite::MakeTag(
+                      mesos::v1::master::Response::kGetAgentsFieldNumber,
+                      WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+              writer.WriteVarint32(serializedGetAgents.size());
+              writer.WriteString(serializedGetAgents);
+
+              // We must manually trim the unused buffer space since
+              // we use the string before the coded output stream is
+              // destructed.
+              writer.Trim();
+
+              return OK(std::move(output), stringify(contentType));
+            }
+
+            case ContentType::JSON: {
+              string body = jsonify([&](JSON::ObjectWriter* writer) {
+                const google::protobuf::Descriptor* descriptor =
+                  v1::master::Response::descriptor();
+
+                int field;
+
+                field = v1::master::Response::kTypeFieldNumber;
+                writer->field(
+                    descriptor->FindFieldByNumber(field)->name(),
+                    v1::master::Response::Type_Name(
+                        v1::master::Response::GET_AGENTS));
+
+                field = v1::master::Response::kGetAgentsFieldNumber;
+                writer->field(
+                    descriptor->FindFieldByNumber(field)->name(),
+                    jsonifyGetAgents(master, approvers));
+              });
+
+              // TODO(bmahler): Pass jsonp query parameter through here.
+              return OK(std::move(body), stringify(contentType));
+            }
+
+            case ContentType::RECORDIO:
+              return BadRequest("Request must accept json or protobuf");
+          }
     }));
+}
+
+
+function<void(JSON::ObjectWriter*)> Master::Http::jsonifyGetAgents(
+    const Master* master,
+    const Owned<ObjectApprovers>& approvers)
+{
+  // Serialize the following:
+  //
+  //   mesos::master::Response::GetAgents getAgents;
+  //   for each registered agent:
+  //     *getAgents.add_agents() = protobuf::master::event::createAgentResponse(
+  //         agent,
+  //         master->slaves.draining.get(slave->id),
+  //         master->slaves.deactivated.contains(slave->id),
+  //         approvers);
+  //   for each recovered agent:
+  //     SlaveInfo* agent = getAgents.add_recovered_agents();
+  //     agent->CopyFrom(slaveInfo);
+  //     agent->clear_resources();
+  //     foreach (const Resource& resource, slaveInfo.resources()):
+  //       if (approvers->approved<VIEW_ROLE>(resource)):
+  //         *agent->add_resources() = resource;
+
+  // TODO(bmahler): This copies the Owned object approvers.
+  return [=](JSON::ObjectWriter* writer) {
+    const google::protobuf::Descriptor* descriptor =
+      v1::master::Response::GetAgents::descriptor();
+
+    int field;
+
+    field = v1::master::Response::GetAgents::kAgentsFieldNumber;
+    writer->field(
+        descriptor->FindFieldByNumber(field)->name(),
+        [&](JSON::ArrayWriter* writer) {
+      foreachvalue (const Slave* slave, master->slaves.registered) {
+        // TODO(bmahler): Consider not constructing the temporary
+        // agent object and instead serialize directly.
+        mesos::master::Response::GetAgents::Agent agent =
+            protobuf::master::event::createAgentResponse(
+                *slave,
+                master->slaves.draining.get(slave->id),
+                master->slaves.deactivated.contains(slave->id),
+                approvers);
+
+        writer->element(asV1Protobuf(agent));
+      }
+    });
+
+    field = v1::master::Response::GetAgents::kRecoveredAgentsFieldNumber;
+    writer->field(
+        descriptor->FindFieldByNumber(field)->name(),
+        [&](JSON::ArrayWriter* writer) {
+      foreachvalue (const SlaveInfo& slaveInfo, master->slaves.recovered) {
+        // TODO(bmahler): Consider not constructing the temporary
+        // SlaveInfo object and instead serialize directly.
+        SlaveInfo agent = slaveInfo;
+        agent.clear_resources();
+        foreach (const Resource& resource, slaveInfo.resources()) {
+          if (approvers->approved<VIEW_ROLE>(resource)) {
+            *agent.add_resources() = resource;
+          }
+        }
+
+        writer->element(asV1Protobuf(agent));
+      }
+    });
+  };
+}
+
+
+string Master::Http::serializeGetAgents(
+    const Owned<ObjectApprovers>& approvers) const
+{
+  // Serialize the following:
+  //
+  //   mesos::master::Response::GetAgents getAgents;
+  //   for each registered agent:
+  //     *getAgents.add_agents() = protobuf::master::event::createAgentResponse(
+  //         agent,
+  //         master->slaves.draining.get(slave->id),
+  //         master->slaves.deactivated.contains(slave->id),
+  //         approvers);
+  //   for each recovered agent:
+  //     SlaveInfo* agent = getAgents.add_recovered_agents();
+  //     agent->CopyFrom(slaveInfo);
+  //     agent->clear_resources();
+  //     foreach (const Resource& resource, slaveInfo.resources()):
+  //       if (approvers->approved<VIEW_ROLE>(resource)):
+  //         *agent->add_resources() = resource;
+
+  string output;
+  google::protobuf::io::StringOutputStream stream(&output);
+  google::protobuf::io::CodedOutputStream writer(&stream);
+
+  foreachvalue (const Slave* slave, master->slaves.registered) {
+    // TODO(bmahler): Consider not constructing the temporary
+    // agent object and instead serialize directly.
+    mesos::master::Response::GetAgents::Agent agent =
+      protobuf::master::event::createAgentResponse(
+          *slave,
+          master->slaves.draining.get(slave->id),
+          master->slaves.deactivated.contains(slave->id),
+          approvers);
+
+    writer.WriteTag(
+        WireFormatLite::MakeTag(
+            mesos::master::Response::GetAgents::kAgentsFieldNumber,
+            WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+    writer.WriteVarint32(agent.ByteSizeLong());
+    agent.SerializeToCodedStream(&writer);
+  }
+
+  foreachvalue (const SlaveInfo& slaveInfo, master->slaves.recovered) {
+    // TODO(bmahler): Consider not constructing the temporary
+    // SlaveInfo object and instead serialize directly.
+    SlaveInfo agent = slaveInfo;
+    agent.clear_resources();
+    foreach (const Resource& resource, slaveInfo.resources()) {
+      if (approvers->approved<VIEW_ROLE>(resource)) {
+        *agent.add_resources() = resource;
+      }
+    }
+
+    writer.WriteTag(
+        WireFormatLite::MakeTag(
+            mesos::master::Response::GetAgents::kRecoveredAgentsFieldNumber,
+            WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+    writer.WriteVarint32(agent.ByteSizeLong());
+    agent.SerializeToCodedStream(&writer);
+  }
+
+  // While an explicit Trim() isn't necessary (since the coded
+  // output stream is destructed before the string is returned),
+  // it's a quite tricky bug to diagnose if Trim() is missed, so
+  // we always do it explicitly to signal the reader about this
+  // subtlety.
+  writer.Trim();
+
+  return output;
 }
 
 
@@ -3037,14 +4042,306 @@ Future<Response> Master::Http::getTasks(
     .then(defer(
         master->self(),
         [=](const Owned<ObjectApprovers>& approvers) -> Response {
-          mesos::master::Response response;
-          response.set_type(mesos::master::Response::GET_TASKS);
+          // Serialize the following message:
+          //
+          //    mesos::master::Response response;
+          //    response.set_type(mesos::master::Response::GET_TASKS);
+          //    *response.mutable_get_tasks() = _getTasks(approvers);
 
-          *response.mutable_get_tasks() = _getTasks(approvers);
+          switch (contentType) {
+            case ContentType::PROTOBUF: {
+              string output;
+              google::protobuf::io::StringOutputStream stream(&output);
+              google::protobuf::io::CodedOutputStream writer(&stream);
 
-          return OK(
-              serialize(contentType, evolve(response)), stringify(contentType));
-  }));
+              writer.WriteTag(
+                  WireFormatLite::MakeTag(
+                      mesos::v1::master::Response::kTypeFieldNumber,
+                      WireFormatLite::WIRETYPE_VARINT));
+              writer.WriteVarint32SignExtended(
+                  mesos::v1::master::Response::GET_TASKS);
+
+              string serializedGetTasks = serializeGetTasks(approvers);
+              writer.WriteTag(
+                  WireFormatLite::MakeTag(
+                      mesos::v1::master::Response::kGetTasksFieldNumber,
+                      WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+              writer.WriteVarint32(serializedGetTasks.size());
+              writer.WriteString(serializedGetTasks);
+
+              // We must manually trim the unused buffer space since
+              // we use the string before the coded output stream is
+              // destructed.
+              writer.Trim();
+
+              return OK(std::move(output), stringify(contentType));
+            }
+
+            case ContentType::JSON: {
+              string body = jsonify([&](JSON::ObjectWriter* writer) {
+                const google::protobuf::Descriptor* descriptor =
+                  v1::master::Response::descriptor();
+
+                int field;
+
+                field = v1::master::Response::kTypeFieldNumber;
+                writer->field(
+                    descriptor->FindFieldByNumber(field)->name(),
+                    v1::master::Response::Type_Name(
+                        v1::master::Response::GET_TASKS));
+
+                field = v1::master::Response::kGetTasksFieldNumber;
+                writer->field(
+                    descriptor->FindFieldByNumber(field)->name(),
+                    jsonifyGetTasks(master, approvers));
+              });
+
+              // TODO(bmahler): Pass jsonp query parameter through here.
+              return OK(std::move(body), stringify(contentType));
+            }
+            case ContentType::RECORDIO:
+              return BadRequest("Request must accept json or protobuf");
+          }
+    }));
+}
+
+
+function<void(JSON::ObjectWriter*)> Master::Http::jsonifyGetTasks(
+    const Master* master,
+    const Owned<ObjectApprovers>& approvers)
+{
+  // Jsonify the following message:
+  //
+  //  master::Response::GetTasks getTasks;
+  //  for each pending task:
+  //    *getTasks.add_pending_tasks() =
+  //      protobuf::createTask(taskInfo, TASK_STAGING, framework->id());
+  //  for each task:
+  //    *getTasks.add_tasks() = *task;
+  //  for each unreachable task:
+  //    *getTasks.add_unreachable_tasks() = *task;
+  //  for each completed task:
+  //    *getTasks.add_completed_tasks() = *task;
+
+  // TODO(bmahler): This copies the Owned object approvers.
+  return [=](JSON::ObjectWriter* writer) {
+    // Construct framework list with both active and completed frameworks.
+    vector<const Framework*> frameworks;
+    foreachvalue (Framework* framework, master->frameworks.registered) {
+      // Skip unauthorized frameworks.
+      if (approvers->approved<VIEW_FRAMEWORK>(framework->info)) {
+        frameworks.push_back(framework);
+      }
+    }
+    foreachvalue (const Owned<Framework>& framework,
+                  master->frameworks.completed) {
+      // Skip unauthorized frameworks.
+      if (approvers->approved<VIEW_FRAMEWORK>(framework->info)) {
+        frameworks.push_back(framework.get());
+      }
+    }
+
+    const google::protobuf::Descriptor* descriptor =
+      v1::master::Response::GetTasks::descriptor();
+
+    int field;
+
+    // Pending tasks.
+    field = v1::master::Response::GetTasks::kPendingTasksFieldNumber;
+    writer->field(
+        descriptor->FindFieldByNumber(field)->name(),
+        [&](JSON::ArrayWriter* writer) {
+          foreach (const Framework* framework, frameworks) {
+            foreachvalue (const TaskInfo& t, framework->pendingTasks) {
+              // Skip unauthorized tasks.
+              if (!approvers->approved<VIEW_TASK>(t, framework->info)) {
+                continue;
+              }
+
+              Task task =
+                  protobuf::createTask(t, TASK_STAGING, framework->id());
+
+              writer->element(asV1Protobuf(task));
+            }
+          }
+        });
+
+    // Active tasks.
+    field = v1::master::Response::GetTasks::kTasksFieldNumber;
+    writer->field(
+        descriptor->FindFieldByNumber(field)->name(),
+        [&](JSON::ArrayWriter* writer) {
+          foreach (const Framework* framework, frameworks) {
+            foreachvalue (Task* task, framework->tasks) {
+              CHECK_NOTNULL(task);
+              // Skip unauthorized tasks.
+              if (!approvers->approved<VIEW_TASK>(*task, framework->info)) {
+                continue;
+              }
+
+              writer->element(asV1Protobuf(*task));
+            }
+          }
+        });
+
+    // Unreachable tasks.
+    field = v1::master::Response::GetTasks::kUnreachableTasksFieldNumber;
+    writer->field(
+        descriptor->FindFieldByNumber(field)->name(),
+        [&](JSON::ArrayWriter* writer) {
+          foreach (const Framework* framework, frameworks) {
+            foreachvalue (const Owned<Task>& task,
+                          framework->unreachableTasks) {
+              // Skip unauthorized tasks.
+              if (!approvers->approved<VIEW_TASK>(*task, framework->info)) {
+                continue;
+              }
+
+              writer->element(asV1Protobuf(*task));
+            }
+          }
+        });
+
+    // Completed tasks.
+    field = v1::master::Response::GetTasks::kCompletedTasksFieldNumber;
+    writer->field(
+        descriptor->FindFieldByNumber(field)->name(),
+        [&](JSON::ArrayWriter* writer) {
+          foreach (const Framework* framework, frameworks) {
+            foreach (const Owned<Task>& task, framework->completedTasks) {
+              // Skip unauthorized tasks.
+              if (!approvers->approved<VIEW_TASK>(*task, framework->info)) {
+                continue;
+              }
+
+              writer->element(asV1Protobuf(*task));
+            }
+          }
+        });
+  };
+}
+
+
+// TODO(bmahler): Have a common function for producing the task
+// lists (or ideally, functions for giving iterators over them to
+// avoid constructing the temporary vectors).
+string Master::Http::serializeGetTasks(
+    const Owned<ObjectApprovers>& approvers) const
+{
+  // Construct framework list with both active and completed frameworks.
+  vector<const Framework*> frameworks;
+  foreachvalue (Framework* framework, master->frameworks.registered) {
+    // Skip unauthorized frameworks.
+    if (approvers->approved<VIEW_FRAMEWORK>(framework->info)) {
+      frameworks.push_back(framework);
+    }
+  }
+  foreachvalue (const Owned<Framework>& framework,
+                master->frameworks.completed) {
+    // Skip unauthorized frameworks.
+    if (!approvers->approved<VIEW_FRAMEWORK>(framework->info)) {
+      frameworks.push_back(framework.get());
+    }
+  }
+
+  // Serialize the following message:
+  //
+  //  mesos::master::Response::GetTasks getTasks;
+  //  for each pending task:
+  //    *getTasks.add_pending_tasks() =
+  //      protobuf::createTask(taskInfo, TASK_STAGING, framework->id());
+  //  for each task:
+  //    *getTasks.add_tasks() = *task;
+  //  for each unreachable task:
+  //    *getTasks.add_unreachable_tasks() = *task;
+  //  for each completed task:
+  //    *getTasks.add_completed_tasks() = *task;
+
+  string output;
+  google::protobuf::io::StringOutputStream stream(&output);
+  google::protobuf::io::CodedOutputStream writer(&stream);
+
+  foreach (const Framework* framework, frameworks) {
+    // Pending tasks.
+    foreachvalue (const TaskInfo& taskInfo, framework->pendingTasks) {
+      // Skip unauthorized tasks.
+      if (!approvers->approved<VIEW_TASK>(taskInfo, framework->info)) {
+        continue;
+      }
+
+      // TODO(bmahler): Consider not constructing the temporary task
+      // object and instead serialize directly. Since we don't expect
+      // a large number of pending tasks, we currently don't bother
+      // with the more efficient approach.
+      //
+      // *getTasks.add_pending_tasks() =
+      //   protobuf::createTask(taskInfo, TASK_STAGING, framework->id());
+      Task task = protobuf::createTask(taskInfo, TASK_STAGING, framework->id());
+      writer.WriteTag(
+          WireFormatLite::MakeTag(
+              mesos::v1::master::Response::GetTasks::kPendingTasksFieldNumber,
+              WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+      writer.WriteVarint32(task.ByteSizeLong());
+      task.SerializeToCodedStream(&writer);
+    }
+
+    // Active tasks.
+    foreachvalue (Task* task, framework->tasks) {
+      CHECK_NOTNULL(task);
+      // Skip unauthorized tasks.
+      if (!approvers->approved<VIEW_TASK>(*task, framework->info)) {
+        continue;
+      }
+
+      writer.WriteTag(
+          WireFormatLite::MakeTag(
+              mesos::v1::master::Response::GetTasks::kTasksFieldNumber,
+              WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+      writer.WriteVarint32(task->ByteSizeLong());
+      task->SerializeToCodedStream(&writer);
+    }
+
+    // Unreachable tasks.
+    foreachvalue (const Owned<Task>& task, framework->unreachableTasks) {
+      // Skip unauthorized tasks.
+      if (!approvers->approved<VIEW_TASK>(*task, framework->info)) {
+        continue;
+      }
+
+      writer.WriteTag(
+          WireFormatLite::MakeTag(
+              mesos::v1::master::Response::GetTasks::
+                kUnreachableTasksFieldNumber,
+              WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+      writer.WriteVarint32(task->ByteSizeLong());
+      task->SerializeToCodedStream(&writer);
+    }
+
+    // Completed tasks.
+    foreach (const Owned<Task>& task, framework->completedTasks) {
+      // Skip unauthorized tasks.
+      if (!approvers->approved<VIEW_TASK>(*task, framework->info)) {
+        continue;
+      }
+
+      // *getTasks.add_completed_tasks() = *task;
+      writer.WriteTag(
+          WireFormatLite::MakeTag(
+              mesos::v1::master::Response::GetTasks::kCompletedTasksFieldNumber,
+              WireFormatLite::WIRETYPE_LENGTH_DELIMITED));
+      writer.WriteVarint32(task->ByteSizeLong());
+      task->SerializeToCodedStream(&writer);
+    }
+  }
+
+  // While an explicit Trim() isn't necessary (since the coded
+  // output stream is destructed before the string is returned),
+  // it's a quite tricky bug to diagnose if Trim() is missed, so
+  // we always do it explicitly to signal the reader about this
+  // subtlety.
+  writer.Trim();
+
+  return output;
 }
 
 

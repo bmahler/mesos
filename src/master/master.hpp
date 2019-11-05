@@ -19,6 +19,7 @@
 
 #include <stdint.h>
 
+#include <functional>
 #include <list>
 #include <memory>
 #include <set>
@@ -1783,6 +1784,11 @@ private:
         const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
+    static std::function<void(JSON::ObjectWriter*)> jsonifyGetAgents(
+        const Master* master,
+        const process::Owned<ObjectApprovers>& approvers);
+    std::string serializeGetAgents(
+        const process::Owned<ObjectApprovers>& approvers) const;
     mesos::master::Response::GetAgents _getAgents(
         const process::Owned<ObjectApprovers>& approvers) const;
 
@@ -1881,6 +1887,11 @@ private:
         const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
+    static std::function<void(JSON::ObjectWriter*)> jsonifyGetTasks(
+        const Master* master,
+        const process::Owned<ObjectApprovers>& approvers);
+    std::string serializeGetTasks(
+        const process::Owned<ObjectApprovers>& approvers) const;
     mesos::master::Response::GetTasks _getTasks(
         const process::Owned<ObjectApprovers>& approvers) const;
 
@@ -1919,6 +1930,11 @@ private:
         const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
+    static std::function<void(JSON::ObjectWriter*)> jsonifyGetFrameworks(
+        const Master* master,
+        const process::Owned<ObjectApprovers>& approvers);
+    std::string serializeGetFrameworks(
+        const process::Owned<ObjectApprovers>& approvers) const;
     mesos::master::Response::GetFrameworks _getFrameworks(
         const process::Owned<ObjectApprovers>& approvers) const;
 
@@ -1927,6 +1943,11 @@ private:
         const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
+    static std::function<void(JSON::ObjectWriter*)> jsonifyGetExecutors(
+        const Master* master,
+        const process::Owned<ObjectApprovers>& approvers);
+    std::string serializeGetExecutors(
+        const process::Owned<ObjectApprovers>& approvers) const;
     mesos::master::Response::GetExecutors _getExecutors(
         const process::Owned<ObjectApprovers>& approvers) const;
 
@@ -1935,6 +1956,11 @@ private:
         const Option<process::http::authentication::Principal>& principal,
         ContentType contentType) const;
 
+    static std::function<void(JSON::ObjectWriter*)> jsonifyGetState(
+        const Master* master,
+        const process::Owned<ObjectApprovers>& approvers);
+    std::string serializeGetState(
+        const process::Owned<ObjectApprovers>& approvers) const;
     mesos::master::Response::GetState _getState(
         const process::Owned<ObjectApprovers>& approvers) const;
 
