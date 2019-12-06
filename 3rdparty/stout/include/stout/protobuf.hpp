@@ -832,10 +832,9 @@ inline void json(ObjectWriter* writer, const Protobuf& protobuf)
   for (int i = 0; i < fieldCount; ++i) {
     const FieldDescriptor* field = descriptor->field(i);
     if (field->is_repeated()) { // Repeated or Map.
-      if (reflection->FieldSize(message, field) > 0) {
-        // Has repeated field with members, output as JSON.
-        fields.push_back(field);
-      }
+      // We always output repeated fields and maps, so empty
+      // repeated fields or maps result in [] or {}.
+      fields.push_back(field);
     } else if (
         reflection->HasField(message, field) ||
         (field->has_default_value() && !field->options().deprecated())) {
@@ -1110,10 +1109,9 @@ inline Object protobuf(const google::protobuf::Message& message)
   for (int i = 0; i < descriptor->field_count(); i++) {
     const google::protobuf::FieldDescriptor* field = descriptor->field(i);
     if (field->is_repeated()) {
-      if (reflection->FieldSize(message, descriptor->field(i)) > 0) {
-        // Has repeated field with members, output as JSON.
-        fields.push_back(field);
-      }
+      // We always output repeated fields and maps, so empty
+      // repeated fields or maps result in [] or {}.
+      fields.push_back(field);
     } else if (
         reflection->HasField(message, field) ||
         (field->has_default_value() && !field->options().deprecated())) {

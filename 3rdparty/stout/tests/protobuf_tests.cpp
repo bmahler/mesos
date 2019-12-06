@@ -113,10 +113,11 @@ TEST(ProtobufTest, JSON)
       "bytes": "Ynl0ZXM=",
       "d": 1.0,
       "e": "ONE",
+      "empty":[],
       "f": 1.0,
       "int32": -1,
       "int64": -1,
-      "nested": { "str": "nested"},
+      "nested": { "repeated_str": [], "str": "nested"},
       "optional_default": 42.0,
       "repeated_bool": [true],
       "repeated_bytes": ["cmVwZWF0ZWRfYnl0ZXM="],
@@ -125,7 +126,7 @@ TEST(ProtobufTest, JSON)
       "repeated_float": [1.0],
       "repeated_int32": [-2],
       "repeated_int64": [-2],
-      "repeated_nested": [ { "str": "repeated_nested" } ],
+      "repeated_nested": [ { "repeated_str": [], "str": "repeated_nested" } ],
       "repeated_sint32": [-2],
       "repeated_sint64": [-2],
       "repeated_string": ["repeated_string"],
@@ -153,6 +154,7 @@ TEST(ProtobufTest, JSON)
       "bytes": "Ynl0ZXM=",
       "d": "1.0",
       "e": "ONE",
+      "empty": [],
       "f": "1.0",
       "int32": "-1",
       "int64": "-1",
@@ -165,7 +167,7 @@ TEST(ProtobufTest, JSON)
       "repeated_float": ["1.0"],
       "repeated_int32": ["-2"],
       "repeated_int64": ["-2"],
-      "repeated_nested": [ { "str": "repeated_nested" } ],
+      "repeated_nested": [ { "repeated_str": [], "str": "repeated_nested" } ],
       "repeated_sint32": ["-2"],
       "repeated_sint64": ["-2"],
       "repeated_string": ["repeated_string"],
@@ -294,15 +296,23 @@ TEST(ProtobufTest, JsonLargeIntegers)
       "bytes": "Ynl0ZXM=",
       "d": 1.0,
       "e": "ONE",
+      "empty": [],
       "f": 1.0,
       "int32": -2147483647,
       "int64": -9223372036854775807,
-      "nested": {"str": "nested"},
+      "nested": {"repeated_str": [], "str": "nested"},
       "optional_default": 42.0,
+      "repeated_bool": [],
+      "repeated_bytes": [],
+      "repeated_double": [],
+      "repeated_enum": [],
+      "repeated_float": [],
       "repeated_int32": [-2000000000],
       "repeated_int64": [-9000000000000000000],
+      "repeated_nested": [],
       "repeated_sint32": [-1000000000],
       "repeated_sint64": [-8000000000000000000],
+      "repeated_string": [],
       "repeated_uint32": [3000000000],
       "repeated_uint64": [7000000000000000000],
       "sint32": -1234567890,
@@ -333,6 +343,131 @@ TEST(ProtobufTest, JsonLargeIntegers)
   Try<JSON::Object> json = JSON::parse<JSON::Object>(expected);
   EXPECT_SOME_EQ(object, json);
 }
+
+
+// We previously omitted empty arrays, so this is an explicit
+// test that empty arrays included in the result given we
+// changed this in MESOS-6568.
+TEST(ProtobufTest, JsonEmptyArray)
+{
+  tests::Message message;
+
+  // Parts of the protobuf that are required.  Copied from the above test.
+  message.set_b(true);
+  message.set_str("string");
+  message.set_bytes("bytes");
+  message.set_f(1.0);
+  message.set_d(1.0);
+  message.set_e(tests::ONE);
+  message.mutable_nested()->set_str("nested");
+
+  // The keys are in alphabetical order.
+  string expected =
+    R"~(
+    {
+      "b": true,
+      "bytes": "Ynl0ZXM=",
+      "d": 1.0,
+      "e": "ONE",
+      "empty": [],
+      "f": 1.0,
+      "nested": {"repeated_str": [], "str": "nested"},
+      "optional_default": 42.0,
+      "repeated_bool": [],
+      "repeated_bytes": [],
+      "repeated_double": [],
+      "repeated_enum": [],
+      "repeated_float": [],
+      "repeated_int32": [],
+      "repeated_int64": [],
+      "repeated_nested": [],
+      "repeated_sint32": [],
+      "repeated_sint64": [],
+      "repeated_string": [],
+      "repeated_uint32": [],
+      "repeated_uint64": [],
+      "str": "string"
+    })~";
+
+  // Remove ' ' and '\n' from `expected` so that we can compare
+  // it with the JSON string parsed from protobuf message.
+  expected.erase(
+      std::remove_if(expected.begin(), expected.end(), ::isspace),
+      expected.end());
+
+  // Check JSON -> String.
+  JSON::Object object = JSON::protobuf(message);
+  EXPECT_EQ(expected, stringify(object));
+
+  // Check JSON -> Protobuf.
+  Try<tests::Message> parse = protobuf::parse<tests::Message>(object);
+  ASSERT_SOME(parse);
+
+  // Check Protobuf -> JSON.
+  EXPECT_EQ(object, JSON::protobuf(parse.get()));
+
+  // Check String -> JSON.
+  Try<JSON::Object> json = JSON::parse<JSON::Object>(expected);
+  EXPECT_SOME_EQ(object, json);
+}
+
+
+// We previously omitted empty maps, so this is an explicit
+// test that empty arrays included in the result given we
+// changed this in MESOS-6568.
+TEST(ProtobufTest, JsonEmptyMap)
+{
+  tests::MapMessage message;
+
+  // The keys are in alphabetical order.
+  // The value of `string_to_bytes` is base64 encoded.
+  string expected =
+    R"~(
+    {
+      "bool_to_string": {},
+      "int32_to_string": {},
+      "int64_to_string": {},
+      "sint32_to_string": {},
+      "sint64_to_string": {},
+      "string_to_bool": {},
+      "string_to_bytes": {},
+      "string_to_double": {},
+      "string_to_enum": {},
+      "string_to_float": {},
+      "string_to_int32": {},
+      "string_to_int64": {},
+      "string_to_nested": {},
+      "string_to_sint32": {},
+      "string_to_sint64": {},
+      "string_to_string": {},
+      "string_to_uint32": {},
+      "string_to_uint64": {},
+      "uint32_to_string": {},
+      "uint64_to_string": {}
+    })~";
+
+  // Remove ' ' and '\n' from `expected` so that we can compare
+  // it with the JSON string parsed from protobuf message.
+  expected.erase(
+      std::remove_if(expected.begin(), expected.end(), ::isspace),
+      expected.end());
+
+  // Check JSON -> String.
+  JSON::Object object = JSON::protobuf(message);
+  EXPECT_EQ(expected, stringify(object));
+
+  // Check JSON -> Protobuf.
+  Try<tests::MapMessage> parse = protobuf::parse<tests::MapMessage>(object);
+  ASSERT_SOME(parse);
+
+  // Check Protobuf -> JSON.
+  EXPECT_EQ(object, JSON::protobuf(parse.get()));
+
+  // Check String -> JSON.
+  Try<JSON::Object> json = JSON::parse<JSON::Object>(expected);
+  EXPECT_SOME_EQ(object, json);
+}
+
 
 
 TEST(ProtobufTest, SimpleMessageEquals)
@@ -585,7 +720,7 @@ TEST(ProtobufTest, Jsonify)
       "f": 1.0,
       "d": 1.0,
       "e": "ONE",
-      "nested": { "str": "nested"},
+      "nested": { "str": "nested", "repeated_str": [] },
       "repeated_bool": [true],
       "repeated_string": ["repeated_string"],
       "repeated_bytes": ["cmVwZWF0ZWRfYnl0ZXM="],
@@ -598,7 +733,8 @@ TEST(ProtobufTest, Jsonify)
       "repeated_float": [1.0],
       "repeated_double": [1.0, 2.0],
       "repeated_enum": ["TWO"],
-      "repeated_nested": [ { "str": "repeated_nested" } ],
+      "repeated_nested": [ { "str": "repeated_nested", "repeated_str": [] } ],
+      "empty":[],
       "optional_default": 42.0
     })~";
 
@@ -687,7 +823,6 @@ TEST(ProtobufTest, JsonifyLargeIntegers)
   message.set_e(tests::ONE);
   message.mutable_nested()->set_str("nested");
 
-  // The keys are in alphabetical order.
   string expected =
     R"~(
     {
@@ -703,13 +838,21 @@ TEST(ProtobufTest, JsonifyLargeIntegers)
       "f": 1.0,
       "d": 1.0,
       "e": "ONE",
-      "nested": {"str": "nested"},
+      "nested": {"str": "nested", "repeated_str": []},
+      "repeated_bool": [],
+      "repeated_string": [],
+      "repeated_bytes": [],
       "repeated_int32": [-2000000000],
       "repeated_int64": [-9000000000000000000],
       "repeated_uint32": [3000000000],
       "repeated_uint64": [7000000000000000000],
       "repeated_sint32": [-1000000000],
       "repeated_sint64": [-8000000000000000000],
+      "repeated_float": [],
+      "repeated_double": [],
+      "repeated_enum": [],
+      "repeated_nested": [],
+      "empty":[],
       "optional_default": 42.0
     })~";
 
@@ -804,9 +947,7 @@ TEST(ProtobufTest, JsonifyMap)
         "key": "ONE"
       },
       "string_to_nested": {
-        "key": {
-          "str": "nested"
-        }
+        "key": { "repeated_str": [], "str": "nested" }
       },
       "bool_to_string": {
         "false": "value2",
@@ -841,8 +982,9 @@ TEST(ProtobufTest, JsonifyMap)
   Try<JSON::Value> jsonActual = JSON::parse(jsonify(JSON::Protobuf(message)));
   ASSERT_SOME(jsonActual);
 
-  EXPECT_EQ(*jsonExpected, *jsonActual);
-
+  EXPECT_EQ(*jsonExpected, *jsonActual)
+    << "Expected: '" << stringify(*jsonExpected) << "'"
+    << " vs actual '" << stringify(*jsonActual) << "'";
 
   // Test that we can map the json back to the expected protobuf.
   Try<tests::MapMessage> protoFromJson =
@@ -851,4 +993,88 @@ TEST(ProtobufTest, JsonifyMap)
 
   EXPECT_TRUE(google::protobuf::util::MessageDifferencer::Equals(
       message, *protoFromJson));
+}
+
+
+// We previously omitted empty arrays, so this is an explicit
+// test that empty arrays included in the result given we
+// changed this in MESOS-6568.
+TEST(ProtobufTest, JsonifyEmptyArray)
+{
+  tests::Message message;
+
+  // The keys are in alphabetical order.
+  string expected =
+    R"~(
+    {
+      "repeated_bool": [],
+      "repeated_string": [],
+      "repeated_bytes": [],
+      "repeated_int32": [],
+      "repeated_int64": [],
+      "repeated_uint32": [],
+      "repeated_uint64": [],
+      "repeated_sint32": [],
+      "repeated_sint64": [],
+      "repeated_float": [],
+      "repeated_double": [],
+      "repeated_enum": [],
+      "repeated_nested": [],
+      "empty": [],
+      "optional_default": 42.0
+    })~";
+
+  // Remove ' ' and '\n' from `expected` so that we can compare
+  // it with the JSON string parsed from protobuf message.
+  expected.erase(
+      std::remove_if(expected.begin(), expected.end(), ::isspace),
+      expected.end());
+
+  // Check JSON -> String.
+  EXPECT_EQ(expected, string(jsonify(JSON::Protobuf(message))));
+}
+
+
+// We previously omitted empty maps, so this is an explicit
+// test that empty arrays included in the result given we
+// changed this in MESOS-6568.
+TEST(ProtobufTest, JsonifyEmptyMap)
+{
+  tests::MapMessage message;
+
+  // The keys are in alphabetical order.
+  // The value of `string_to_bytes` is base64 encoded.
+  string expected =
+    R"~(
+    {
+      "string_to_string": {},
+      "string_to_bool": {},
+      "string_to_bytes": {},
+      "string_to_int32": {},
+      "string_to_int64": {},
+      "string_to_uint32": {},
+      "string_to_uint64": {},
+      "string_to_sint32": {},
+      "string_to_sint64": {},
+      "string_to_float": {},
+      "string_to_double": {},
+      "string_to_enum": {},
+      "string_to_nested": {},
+      "bool_to_string": {},
+      "int32_to_string": {},
+      "int64_to_string": {},
+      "uint32_to_string": {},
+      "uint64_to_string": {},
+      "sint32_to_string": {},
+      "sint64_to_string": {}
+    })~";
+
+  // Remove ' ' and '\n' from `expected` so that we can compare
+  // it with the JSON string parsed from protobuf message.
+  expected.erase(
+      std::remove_if(expected.begin(), expected.end(), ::isspace),
+      expected.end());
+
+  // Check JSON -> String.
+  EXPECT_EQ(expected, string(jsonify(JSON::Protobuf(message))));
 }
