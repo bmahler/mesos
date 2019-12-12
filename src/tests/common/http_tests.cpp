@@ -258,7 +258,8 @@ TEST(HTTP, SerializeNetworkInfo)
       "  \"groups\": ["
       "    \"foo\","
       "    \"bar\""
-      "  ]"
+      "  ],"
+      "  \"port_mappings\": []"
       "}");
 
   ASSERT_SOME(expected);

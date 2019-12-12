@@ -302,6 +302,7 @@ TEST_F(MasterQuotaTest, UpdateAndGetQuota)
       "        \"role\": \"role1\","
       "        \"guarantee\": ["
       "           {"
+      "             \"reservations\": [],"
       "             \"name\": \"cpus\","
       "             \"type\": \"SCALAR\","
       "             \"scalar\": {"
@@ -309,6 +310,7 @@ TEST_F(MasterQuotaTest, UpdateAndGetQuota)
       "             }"
       "           },"
       "           {"
+      "             \"reservations\": [],"
       "             \"name\": \"mem\","
       "             \"type\": \"SCALAR\","
       "             \"scalar\": {"
@@ -347,7 +349,9 @@ TEST_F(MasterQuotaTest, UpdateAndGetQuota)
   Try<JSON::Value> actual = JSON::parse(response->body);
   ASSERT_SOME(actual);
 
-  EXPECT_EQ(*expected, *(actual));
+  EXPECT_EQ(*expected, *(actual))
+    << "Expected: " << stringify(*expected) << "\n"
+    << "  Actual: " << stringify(*actual);
 
   // Verify get "/quota".
   response = process::http::get(
@@ -366,6 +370,7 @@ TEST_F(MasterQuotaTest, UpdateAndGetQuota)
       "      \"guarantee\": ["
       "         {"
       "           \"name\": \"cpus\","
+      "           \"reservations\": [],"
       "           \"type\": \"SCALAR\","
       "           \"scalar\": {"
       "             \"value\": 1"
@@ -373,6 +378,7 @@ TEST_F(MasterQuotaTest, UpdateAndGetQuota)
       "         },"
       "         {"
       "           \"name\": \"mem\","
+      "           \"reservations\": [],"
       "           \"type\": \"SCALAR\","
       "           \"scalar\": {"
       "             \"value\": 1024"
@@ -408,7 +414,9 @@ TEST_F(MasterQuotaTest, UpdateAndGetQuota)
   actual = JSON::parse(response->body);
   ASSERT_SOME(actual);
 
-  EXPECT_EQ(*expected, *(actual));
+  EXPECT_EQ(*expected, *(actual))
+    << "Expected: " << stringify(*expected) << "\n"
+    << "  Actual: " << stringify(*actual);
 }
 
 

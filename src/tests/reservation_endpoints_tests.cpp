@@ -1794,7 +1794,8 @@ TEST_F(ReservationEndpointsTest, AgentStateEndpointResources)
             "scalar": {
               "value": 3.0
             },
-            "type": "SCALAR"
+            "type": "SCALAR",
+            "reservations": []
           },
           {
             "name": "mem",
@@ -1802,7 +1803,8 @@ TEST_F(ReservationEndpointsTest, AgentStateEndpointResources)
             "scalar": {
               "value": 1536.0
             },
-            "type": "SCALAR"
+            "type": "SCALAR",
+            "reservations": []
           },
           {
             "name": "disk",
@@ -1810,7 +1812,8 @@ TEST_F(ReservationEndpointsTest, AgentStateEndpointResources)
             "scalar": {
               "value": 3072.0
             },
-            "type": "SCALAR"
+            "type": "SCALAR",
+            "reservations": []
           },
           {
             "name": "ports",
@@ -1823,7 +1826,8 @@ TEST_F(ReservationEndpointsTest, AgentStateEndpointResources)
                 }
               ]
             },
-            "type": "RANGES"
+            "type": "RANGES",
+            "reservations": []
           }
         ])~").get();
 
