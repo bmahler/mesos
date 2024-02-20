@@ -10,11 +10,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License
 
+#ifdef __linux__
+#include <memory>
+
+#include <sys/inotify.h>
+#endif
+
 #include <process/future.hpp>
 #include <process/io.hpp>
 #include <process/loop.hpp>
 
 #include <stout/error.hpp>
+#include <stout/hashmap.hpp>
 #include <stout/none.hpp>
 #include <stout/option.hpp>
 #include <stout/os.hpp>
@@ -25,6 +32,10 @@
 #include <stout/os/write.hpp>
 
 #include "io_internal.hpp"
+
+using std::default_delete;
+using std::shared_ptr;
+using std::string;
 
 namespace process {
 namespace io {
@@ -136,5 +147,200 @@ Try<bool> is_async(int_fd fd)
 }
 
 } // namespace internal {
+
+#ifdef __linux__
+
+Watcher::Watcher(int eventfd) : inotify_fd(inotify_fd), data(new Data()) {}
+
+
+Watcher::~Data()
+{
+  // When the last reference of data goes away, we discard the read loop
+  // which should ensure that the loop future transitions, at which point
+  // the inotify fd will get closed.
+  read_loop.discard();
+}
+
+
+void Watcher::run()
+{
+  // For now, we only use a small buffer that is sufficient for reading
+  // *at least* 32 events, but the caller may want to customize the buffer
+  // size depending on the expected volume of events.
+  size_t buffer_size = 32 * sizeof(inotify_event) + NAME_MAX + 1;
+  shared_ptr<char> buffer(new char[buffer_size], std::default_delete<char[]>());
+
+  // We take a weak pointer here to avoid keeping Data alive forever, when
+  // the caller throws away the last Watcher copy, we want Data to be destroyed
+  // and the loop to be stopped.
+  weak_ptr<Data> weak_data = data;
+  Future<Nothing> read_loop = loop(
+      new ProcessBase(ID::generate("io::Watcher")),
+      [=]() {
+        return io::read(inotify_fd, buffer, buffer_size)
+      },
+      [weak_data, buffer](size_t read) -> Future<ControlFlow<Nothing>> {
+        if (read == 0) {
+          return Failure("Unexpected EOF");
+        }
+
+        // If we can't get the shared pointer, Data is destroyed and we
+        // need to stop the loop.
+        shared_ptr<Data> data = weak_ptr.lock();
+        if (!data) {
+          return Break();
+        }
+
+        int offset;
+        for (offset = 0; offset < read - sizeof(inotify_event);) {
+          inotify_event* event = (inotify_event*) &(buffer.get()[offset]);
+          offset += sizeof(inotify_event) + event->len;
+
+          if (event-> mask & IN_Q_OVERFLOW) {
+            return Failure("inotify event overflow");
+          }
+
+          Event e;
+
+          synchronized (data_copy->lock) {
+            Option<string> path = data_copy->wd_to_path.get(wd);
+
+            if (path.isNone()) {
+              // Unknown watch, likely we just removed this watch.
+              continue;
+            }
+
+            if (event->mask & IN_IGNORED) {
+              continue;
+            }
+
+            CHECK(!(event->mask & IN_ISDIR));
+
+            e.path = *path;
+
+            if (event->mask & IN_MODIFY) {
+              e.type = Write;
+            }
+
+            if (event->mask & IN_MOVE_SELF) {
+              e.type = Rename;
+              data_copy->wd_to_path.erase(event->wd);
+              data_copy->path_to_wd.erase(*path);
+            }
+
+            if (event->mask & IN_DELETE_SELF) {
+              e.type = Remove;
+              data_copy->wd_to_path.erase(event->wd);
+              data_copy->path_to_wd.erase(*path);
+            }
+
+            if (event->mask & IN_UNMOUNT) {
+              e.type = Remove;
+              data_copy->wd_to_path.erase(event->wd);
+              data_copy->path_to_wd.erase(*path);
+            }
+          }
+
+          data_copy->events.put(e);
+        }
+
+        if (offset != read) {
+          return Failure("Unexpected partial read from inotify");
+        }
+
+        return Continue();
+      });
+
+  read_loop
+    .onFailure([weak_data](const string& message) {
+      shared_ptr<Data> data = weak_data.lock()
+      if (data) {
+        Event e;
+        e.type = Failure;
+        e.path = message;
+        data->events.put(e);
+      }
+    });
+
+  // We need to close the inotify fd whenever the loop stops.
+  int fd = inotify_fd;
+  read_loop
+    .onAny([fd]() {
+      ::close(fd);
+    });
+}
+
+
+Try<Nothing> Watcher::add(const string& path)
+{
+  // Since we only currently support watching a file (not directories),
+  // and we're only interested in modifications to the file contents,
+  // we only need to watch for the following relevant events:
+  int mask = IN_MODIFY | IN_CLOSE_WRITE | IN_DELETE_SELF | IN_MOVE_SELF;
+
+  // Fail with EEXIST if a watch already exists. This ensures that new
+  // watches don't modify existing ones, either because the path gets
+  // watched multiple times, or when two paths refer to the same inode.
+  mask = mask | IN_MASK_CREATE;
+
+  synchronized (data->lock) {
+    Option<int> wd = path_to_wd.get(path);
+    if (wd.isSome()) {
+      return Error("Path is already added");
+    }
+
+    int wd = inotify_add_watch(fd, path.c_str(), mask);
+    if (wd < 0) {
+      return ErrnoError("Failed to inotify_add_watch");
+    }
+
+    wd_to_path[wd] = path;
+    path_to_wd[path] = wd;
+  }
+}
+
+
+Try<Nothing> Watcher::remove(const string& path)
+{
+  synchronized (data->lock) {
+    Option<int> wd = path_to_wd.get(path);
+    if (wd.isNone()) {
+      // Note that the path may have been implicitly removed via the
+      // read loop when the file gets removed. Should we treat this as
+      // a failure? Or a no-op?
+      return Nothing();
+    }
+
+    wd_to_path.erase(*wd);
+    path_to_wd.erase(path);
+  }
+
+  // Note that removing the watch will trigger an IN_IGNORED event.
+  if (inotify_rm_watch(fd, wd) < 0) {
+    return ErrnoError("Failed to inotify_rm_watch");
+  }
+}
+
+
+Queue<Event> Watcher::events()
+{
+  return data->events;
+}
+
+
+Try<Watcher> create_watcher()
+{
+  int inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+  if (inotify_fd < 0) {
+    return ErrnoError("Failed to inotify_init1");
+  }
+
+  Watcher watcher(inotify_fd);
+  watch.run();
+  return watcher;
+}
+
+#endif // __linux__
+
 } // namespace io {
 } // namespace process {
